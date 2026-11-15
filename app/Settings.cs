@@ -65,6 +65,7 @@ namespace RobloxProductManager
                 s.RefreshToken = Unprotect(J.Str(d, "refreshToken"));
                 s.LastUniverse = J.Str(d, "lastUniverse");
                 if (J.Str(d, "scopes") != "") s.Scopes = J.Str(d, "scopes");
+                if (s.ClientId == BuiltInClientId || Array.IndexOf(PreviousBuiltInClientIds, s.ClientId) >= 0) s.Scopes = DefaultScopes; // the built-in app always asks for the current scopes
                 int port;
                 if (int.TryParse(J.Str(d, "port"), out port) && port > 0 && port < 65536) s.Port = port;
                 var kb = J.G(d, "knownBadges") as Dictionary<string, object>;
@@ -109,7 +110,11 @@ namespace RobloxProductManager
                 { "lastUniverse", LastUniverse },
                 { "knownBadges", knownBadges.Where(p => p.Value.Count > 0).ToDictionary(p => p.Key, p => p.Value.ToArray()) },
             };
-            File.WriteAllText(FilePath, J.S.Serialize(d));
+            // Write to a temporary file first, then swap it in, so a crash mid-write can't corrupt the settings.
+            string tmp = FilePath + ".tmp";
+            File.WriteAllText(tmp, J.S.Serialize(d));
+            if (File.Exists(FilePath)) File.Replace(tmp, FilePath, null);
+            else File.Move(tmp, FilePath);
         }
 
         static string Protect(string value)

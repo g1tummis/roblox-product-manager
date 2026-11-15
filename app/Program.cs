@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Net;
 using System.Reflection;
 using System.Runtime.Versioning;
@@ -8,8 +8,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Roblox Product Manager")]
 [assembly: AssemblyProduct("Roblox Product Manager")]
 [assembly: AssemblyDescription("Create and edit Roblox game passes, developer products and badges.")]
-[assembly: AssemblyVersion("2.1.0.0")]
-[assembly: AssemblyFileVersion("2.1.0.0")]
+[assembly: AssemblyVersion("2.2.0.0")]
+[assembly: AssemblyFileVersion("2.2.0.0")]
 [assembly: TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
 
 namespace RobloxProductManager

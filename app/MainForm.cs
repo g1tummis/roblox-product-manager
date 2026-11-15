@@ -13,7 +13,8 @@ namespace RobloxProductManager
         readonly Settings settings;
         readonly RobloxClient api;
         readonly List<KindPanel> panels = new List<KindPanel>();
-        Panel signedOutPanel, mainPanel;
+        Panel signedOutPanel, mainPanel, loadingPanel;
+        Label loadingLabel;
         Button signInBtn;
         Label signedOutMsg, waitingLabel, whoLabel, noGamesLabel;
         LinkLabel settingsLink;
@@ -54,6 +55,7 @@ namespace RobloxProductManager
 #endif
 
             BuildSignedOutPanel();
+            BuildLoadingPanel();
             BuildMainPanel();
             var strip = new StatusStrip();
             statusLabel = new ToolStripStatusLabel { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -64,11 +66,12 @@ namespace RobloxProductManager
 
             Controls.Add(mainPanel);
             Controls.Add(signedOutPanel);
+            Controls.Add(loadingPanel);
             Controls.Add(strip);
             ResumeLayout(false);
             PerformLayout();
 
-            ShowSignedOut("");
+            ShowLoading("Starting...");
             Shown += async (s, e) => await Startup();
             FormClosing += OnFormClosing;
         }
@@ -203,9 +206,41 @@ namespace RobloxProductManager
 
         bool HasUnsaved() { return panels.Any(p => p.HasUnsaved); }
 
+        // Makes a tab reload its list the next time it is shown (panels are in Kind order).
+        public void MarkStale(Kind k) { panels[(int)k].LoadedFor = null; }
+
         // ---------- views ----------
+        void BuildLoadingPanel()
+        {
+            loadingPanel = new Panel { Dock = DockStyle.Fill, Visible = false };
+            var title = new Label
+            {
+                Text = "Roblox Product Manager", Dock = DockStyle.Top, Height = 120, TextAlign = ContentAlignment.BottomCenter,
+                Font = new Font(Font.FontFamily, 16F, FontStyle.Bold),
+            };
+            loadingLabel = new Label { Text = "Loading...", Dock = DockStyle.Top, Height = 40, TextAlign = ContentAlignment.MiddleCenter, ForeColor = SystemColors.GrayText };
+            var bar = new ProgressBar { Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 30, Width = 240, Height = 14 };
+            var barHolder = new Panel { Dock = DockStyle.Top, Height = 30 };
+            barHolder.Controls.Add(bar);
+            barHolder.Resize += (s, e) => bar.Left = Math.Max(0, (barHolder.Width - bar.Width) / 2);
+            loadingPanel.Controls.Add(barHolder);
+            loadingPanel.Controls.Add(loadingLabel);
+            loadingPanel.Controls.Add(title);
+        }
+
+        // Shown at startup until the app knows whether the user is signed in.
+        void ShowLoading(string text)
+        {
+            loadingLabel.Text = text;
+            signedOutPanel.Visible = false;
+            mainPanel.Visible = false;
+            loadingPanel.Visible = true;
+            SetStatus(text);
+        }
+
         void ShowSignedOut(string message)
         {
+            loadingPanel.Visible = false;
             mainPanel.Visible = false;
             signedOutPanel.Visible = true;
             signedOutMsg.Text = message;
@@ -215,6 +250,7 @@ namespace RobloxProductManager
 
         void ShowMain()
         {
+            loadingPanel.Visible = false;
             signedOutPanel.Visible = false;
             mainPanel.Visible = true;
             whoLabel.Text = api.User != null ? "Signed in as " + api.User.Display : "";
@@ -228,13 +264,15 @@ namespace RobloxProductManager
             if (api.User == null || api.User.Id == "" || headshotFor == api.User.Id) return;
             string userId = api.User.Id;
             headshotFor = userId;
-            headshot.Image = null;
+            var old = headshot.Image; headshot.Image = null; if (old != null) old.Dispose();
             try
             {
                 string url = await api.HeadshotUrl(userId);
                 if (url == "") return;
                 var img = await api.DownloadImage(url, 32);
-                if (img != null && api.User != null && api.User.Id == userId) headshot.Image = img;
+                if (img == null) return;
+                if (api.User != null && api.User.Id == userId) { var prev = headshot.Image; headshot.Image = img; if (prev != null) prev.Dispose(); }
+                else img.Dispose(); // user changed while downloading
             }
             catch (ApiException) { headshotFor = null; /* the picture is optional */ }
         }
@@ -265,18 +303,19 @@ namespace RobloxProductManager
         {
             if (!settings.Complete)
             {
+                ShowSignedOut("");
                 if (OpenSetup(true)) SetStatus("Settings saved. Click Sign in with Roblox.");
                 return;
             }
-            if (settings.RefreshToken == "") return;
-            SetSigningIn(true, "Signing you back in...");
+            if (settings.RefreshToken == "") { ShowSignedOut(""); return; } // nothing saved: sign-in is needed
+            ShowLoading("Signing you back in...");
             try
             {
                 if (await api.TryRestore()) { ShowMain(); await ReloadGames(); }
                 else ShowSignedOut("");
             }
             catch (ApiException ex) { ShowSignedOut(ex.Message + " Click Sign in with Roblox to try again."); }
-            finally { SetSigningIn(false, ""); }
+            finally { progress.Visible = Busy; }
         }
 
         async Task SignIn(bool chooseGames)
@@ -415,7 +454,8 @@ namespace RobloxProductManager
                 if (!Ask("Work is still running. Quit anyway? Rows that haven't been processed yet won't be created or saved.")) e.Cancel = true;
                 return;
             }
-            if (HasUnsaved() && !Ask("You have unsaved edits. Quit and throw them away?")) e.Cancel = true;
+            if (HasUnsaved() && !Ask("You have unsaved edits. Quit and throw them away?")) { e.Cancel = true; return; }
+            if (panels.Any(p => p.HasPendingCreates) && !Ask("You have rows that haven't been created yet. Quit anyway?")) e.Cancel = true;
         }
     }
 }

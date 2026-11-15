@@ -47,13 +47,13 @@ namespace RobloxProductManager
     {
         public string Id = "", Name = "", Description = "";
         public long? Price;
-        public bool ForSale, Regional, Enabled, Locked;
+        public bool ForSale, Regional, Managed, Enabled, Locked;
         public string IconAssetId = ""; // developer products: the icon image asset (used to fetch its thumbnail)
     }
 
     class NewItem
     {
-        public string Name = "", Description = "", ImagePath = "", Regional = ""; // Regional: "", "true" or "false"
+        public string Name = "", Description = "", ImagePath = "", Regional = "", Managed = ""; // Regional / Managed: "", "true" or "false"
         public long? Price;
         public bool ForSale, Active;
     }
@@ -63,10 +63,10 @@ namespace RobloxProductManager
         public string Name, Description, ImagePath;
         public long? Price;
         public bool PriceOrSaleChanged, ForSale;
-        public bool? Regional, Enabled;
+        public bool? Managed, Enabled;
         public bool Any
         {
-            get { return Name != null || Description != null || ImagePath != null || PriceOrSaleChanged || Regional.HasValue || Enabled.HasValue; }
+            get { return Name != null || Description != null || ImagePath != null || PriceOrSaleChanged || Managed.HasValue || Enabled.HasValue; }
         }
     }
 
@@ -74,6 +74,7 @@ namespace RobloxProductManager
     {
         public readonly int Status;
         public readonly bool SignedOut;
+        public bool Uncertain; // a create/update request whose result is unknown (timeout or dropped connection)
         public ApiException(int status, string message, bool signedOut = false) : base(message)
         {
             Status = status;
@@ -113,24 +114,63 @@ namespace RobloxProductManager
         }
 
         // Turns a Roblox error response into a readable sentence.
+        // Handles every error shape Roblox uses: Open Cloud {errorMessage, field, hint}, newer {code, message},
+        // legacy web APIs {errors:[{code, message, userFacingMessage}]}, OAuth {error, error_description},
+        // and non-JSON bodies such as HTML outage pages.
         public static string Describe(string text, int status)
         {
             object o = null;
             try { o = Parse(text); } catch (Exception) { }
+            string m = "";
             if (o is Dictionary<string, object>)
             {
-                string m = Str(o, "errorMessage");
-                if (m != "") return Str(o, "field") != "" ? m + " (" + Str(o, "field") + ")" : m;
+                m = Str(o, "errorMessage");
+                if (m != "")
+                {
+                    if (Str(o, "field") != "" && m.IndexOf(Str(o, "field"), StringComparison.OrdinalIgnoreCase) < 0) m += " (" + Str(o, "field") + ")";
+                    if (Str(o, "hint") != "") m += (m.EndsWith(".") || m.EndsWith("!") || m.EndsWith(")") ? " " : ". ") + Str(o, "hint");
+                }
                 var errors = A(o, "errors");
-                if (errors.Length > 0) return string.Join("; ", errors.Select(e => Str(e, "message") != "" ? Str(e, "message") : Str(e, "code")));
-                foreach (var key in new[] { "message", "error_description", "error" })
-                    if (Str(o, key) != "") return Str(o, key);
+                if (m == "" && errors.Length > 0)
+                    m = string.Join("; ", errors.Select(e =>
+                        Str(e, "userFacingMessage") != "" && Str(e, "userFacingMessage") != "Something went wrong" ? Str(e, "userFacingMessage")
+                        : Str(e, "message") != "" ? Str(e, "message") : "error code " + Str(e, "code")));
+                if (m == "")
+                    foreach (var key in new[] { "message", "error_description", "error", "title" })
+                        if (Str(o, key) != "") { m = Str(o, key); break; }
             }
+            return Explain(m.Trim(), status, text);
+        }
+
+        // Adds plain-language context to known problems and turns empty or non-JSON errors into a sentence.
+        static string Explain(string m, int status, string raw)
+        {
+            if (m.IndexOf("Expected badge cost is different", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "The badge price changed (the free daily count was probably used up elsewhere), so Roblox stopped and nothing was charged. Click Create all again to see the new price.";
+            if (m.IndexOf("Insufficient funds", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Not enough Robux to pay for this badge. Nothing was charged.";
+            if (m.IndexOf("moderated", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Roblox's text filter blocked this name or description. Try different wording.";
+            if (m != "" && status != 429 && status < 500) return m;
+
+            if (status == 429)
+                return "Roblox is limiting how fast requests can be made. Wait a minute, then try again." + (m != "" ? " (" + m + ")" : "");
+            if (status >= 500)
+                return "Roblox had a problem on its side (HTTP " + status + "). Try again in a moment." + (m != "" && !LooksLikeHtml(m) ? " (" + m + ")" : "");
             if (status == 401 || status == 403)
                 return "Roblox refused this (" + status + "). You may not have permission to manage this game, or the app is missing a permission scope.";
-            string snippet = (text ?? "").Trim();
-            if (snippet.Length > 200) snippet = snippet.Substring(0, 200);
-            return "Request failed (HTTP " + status + ")" + (snippet != "" ? ": " + snippet : "");
+            if (status == 404)
+                return "Roblox couldn't find this (404). It may have been deleted, or it belongs to a different game.";
+            string snippet = (raw ?? "").Trim();
+            if (LooksLikeHtml(snippet)) snippet = "";
+            if (snippet.Length > 200) snippet = snippet.Substring(0, 200) + "...";
+            return "Roblox returned an error (HTTP " + status + ")" + (snippet != "" ? ": " + snippet : ".");
+        }
+
+        static bool LooksLikeHtml(string s)
+        {
+            s = (s ?? "").TrimStart();
+            return s.StartsWith("<", StringComparison.Ordinal);
         }
     }
 
@@ -445,6 +485,15 @@ namespace RobloxProductManager
         static ApiException Offline() { return new ApiException(0, "Could not reach Roblox. Check your internet connection and try again."); }
         static ApiException TooSlow() { return new ApiException(0, "Roblox took too long to respond. Try again."); }
 
+        // For anything that changes data, a timeout means Roblox may have done it anyway.
+        static ApiException MaybeDone(ApiException ex, HttpMethod method)
+        {
+            if (method == HttpMethod.Get) return ex;
+            var e = new ApiException(0, "No answer from Roblox, so it may or may not have gone through. Reload and check before trying again.");
+            e.Uncertain = true;
+            return e;
+        }
+
         // A Client Secret is sent only if one is set. Without one the app is a public client:
         // the PKCE code_verifier proves the sign-in, as Roblox's OAuth docs describe for apps that can't keep secrets.
         async Task<object> OAuthPost(string path, Dictionary<string, string> form)
@@ -486,12 +535,13 @@ namespace RobloxProductManager
                     if (body != null) req.Content = body(); // rebuilt on every attempt
                     HttpResponseMessage resp;
                     try { resp = await http.SendAsync(req); }
-                    catch (HttpRequestException) { throw Offline(); }
-                    catch (TaskCanceledException) { throw TooSlow(); }
+                    catch (HttpRequestException) { throw MaybeDone(Offline(), method); }
+                    catch (TaskCanceledException) { throw MaybeDone(TooSlow(), method); }
                     using (resp)
                     {
                         int status = (int)resp.StatusCode;
                         if (status == 429 && attempt < 3) { await Task.Delay(RetryDelay(resp, attempt)); continue; }
+                        if (status >= 500 && method == HttpMethod.Get && attempt < 3) { await Task.Delay(TimeSpan.FromSeconds(attempt)); continue; } // temporary Roblox trouble: reads are safe to retry
                         if (status == 401 && auth && attempt == 1) { forceRefresh = true; continue; }
                         string text = await resp.Content.ReadAsStringAsync();
                         if (!resp.IsSuccessStatusCode) throw new ApiException(status, J.Describe(text, status));
@@ -584,6 +634,7 @@ namespace RobloxProductManager
                             Regional = J.A(pi, "enabledFeatures").Any(f => Convert.ToString(f) == "RegionalPricing"),
                             Locked = J.B(x, "isImmutable"),
                             IconAssetId = J.Str(x, "iconImageAssetId"),
+                            Managed = J.B(x, "isManagedPricingEnabled"),
                         });
                     }
                     token = J.Str(d, "nextPageToken");
@@ -602,14 +653,16 @@ namespace RobloxProductManager
         {
             var known = settings.KnownBadges(universe);
             var listed = new HashSet<string>(list.Select(i => i.Id));
+            bool removed = false;
             foreach (var id in known.Where(id => !listed.Contains(id)).ToList())
             {
                 try { list.Add(await GetBadge(universe, id)); }
-                catch (ApiException ex) { if (ex.Status == 404 || ex.Status == 400) known.Remove(id); } // deleted or not in this game
+                catch (ApiException ex) { if (ex.Status == 404 || ex.Status == 400) { known.Remove(id); removed = true; } } // deleted or not in this game
             }
+            int before = known.Count;
             foreach (var i in list) known.Add(i.Id);
             list.Sort((a, b) => CompareIds(a.Id, b.Id));
-            TrySave();
+            if (known.Count != before || removed) TrySave(); // only write the settings file when something changed
         }
 
         static int CompareIds(string a, string b)
@@ -657,6 +710,7 @@ namespace RobloxProductManager
                     f.Add("isForSale", Bool(n.ForSale));
                     if (n.Price.HasValue) f.Add("price", n.Price.Value.ToString(CultureInfo.InvariantCulture));
                     if (n.Regional != "") f.Add("isRegionalPricingEnabled", n.Regional);
+                    if (n.Managed != "") f.Add("isManagedPricingEnabled", n.Managed); // Managed pricing includes regional pricing
                 }
                 if (image != null) f.AddFile(kind == Kind.Badge ? "files" : "imageFile", n.ImagePath, image);
                 return f.Content;
@@ -664,6 +718,22 @@ namespace RobloxProductManager
             string newId = J.Str(r, kind == Kind.Pass ? "gamePassId" : kind == Kind.Product ? "productId" : "id");
             if (kind == Kind.Badge) RememberBadge(u.Id, newId);
             return newId;
+        }
+
+        // Reads one pass/product's pricing back from Roblox (Regional and Managed are filled in).
+        // Roblox can answer "success" to a change it didn't apply, so the app checks.
+        public async Task<Item> ReadPricing(Kind kind, string universe, string id)
+        {
+            string url = kind == Kind.Pass
+                ? Apis + "/game-passes/v1/universes/" + universe + "/game-passes/" + id + "/creator"
+                : Apis + "/developer-products/v2/universes/" + universe + "/developer-products/" + id + "/creator";
+            var x = await Send(HttpMethod.Get, url, null, true);
+            return new Item
+            {
+                Id = id,
+                Regional = J.A(J.G(x, "priceInformation"), "enabledFeatures").Any(f => Convert.ToString(f) == "RegionalPricing"),
+                Managed = J.B(x, "isManagedPricingEnabled"),
+            };
         }
 
         public async Task UpdateItem(Kind kind, string universe, string id, ItemChanges ch)
@@ -692,7 +762,7 @@ namespace RobloxProductManager
                     f.Add("isForSale", Bool(ch.ForSale));
                     if (ch.Price.HasValue) f.Add("price", ch.Price.Value.ToString(CultureInfo.InvariantCulture));
                 }
-                if (ch.Regional.HasValue) f.Add("isRegionalPricingEnabled", Bool(ch.Regional.Value));
+                if (ch.Managed.HasValue) f.Add("isManagedPricingEnabled", Bool(ch.Managed.Value));
                 if (image != null) f.AddFile("imageFile", ch.ImagePath, image);
                 return f.Content;
             }, true);
@@ -730,6 +800,19 @@ namespace RobloxProductManager
             var d = await Send(HttpMethod.Get, ThumbsApi + "/v1/users/avatar-headshot?userIds=" + E(userId) + "&size=48x48&format=Png&isCircular=true", null, false);
             var first = J.A(d, "data").FirstOrDefault();
             return J.Str(first, "state") == "Completed" ? J.Str(first, "imageUrl") : "";
+        }
+
+        // Downloads a file to a temporary path (used to re-upload an existing icon). Returns null on failure.
+        public async Task<string> DownloadToTemp(string url, string name)
+        {
+            try
+            {
+                byte[] bytes = await http.GetByteArrayAsync(url);
+                string path = Path.Combine(Path.GetTempPath(), "rpm-" + name + ".png");
+                File.WriteAllBytes(path, bytes);
+                return path;
+            }
+            catch (Exception) { return null; }
         }
 
         // Downloads an image and shrinks it to size x size pixels so it uses little memory. Returns null on failure.

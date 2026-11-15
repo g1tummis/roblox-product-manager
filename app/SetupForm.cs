@@ -142,12 +142,19 @@ namespace RobloxProductManager
                 MessageBox.Show(this, "Roblox client secrets usually start with \"RBX-\". Save this one anyway?", Text,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
 
+            string oldId = s.ClientId, oldSecret = s.ClientSecret, oldScopes = s.Scopes;
+            int oldPort = s.Port;
             s.ClientId = id;
             s.ClientSecret = secret;
             s.Port = (int)portBox.Value;
             s.Scopes = string.Join(" ", scopes);
             try { s.Save(); }
-            catch (Exception ex) { Warn("Could not save the settings: " + ex.Message); return; }
+            catch (Exception ex)
+            {
+                s.ClientId = oldId; s.ClientSecret = oldSecret; s.Port = oldPort; s.Scopes = oldScopes; // keep what was in effect
+                Warn("Could not save the settings: " + ex.Message);
+                return;
+            }
             DialogResult = DialogResult.OK;
         }
     }

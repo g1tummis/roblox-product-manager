@@ -84,11 +84,17 @@ They stay signed in the next time they open the app. Their sign-in is saved in `
 - Click **Create all**. Rows are created one by one, and each row shows its result and new ID. Rows that fail stay editable with Roblox's error message: fix them and click **Create all** again. Created rows are skipped and greyed out.
 - Draft rows stay when you switch games, so you can create the same set in several games.
 
+**Giftable.** On the Game Passes and Developer Products tabs, tick **Giftable** on a row to also create a gift developer product for it. It gets the same price and image, the name `[GIFT] <name>`, and the description "Gift the <name> pass to a player" (or "product"). Gift products never use regional pricing.
+
+For passes and products that already exist, select their rows in the Existing grid (Ctrl+click for several) and click **Make gift**. Each gets the same kind of gift product, using the item's current icon from Roblox. Items that already have a `[GIFT]` product are skipped.
+
 **Edit.** The bottom grid shows what already exists. Edit any cell, or drop a new image onto a row. Changed rows turn yellow. Click **Save changes**, and the grid reloads from Roblox so it shows what was really saved. Double-click an ID (or click **Open on Roblox**) to open the item's Roblox page. Select cells and press Ctrl+C to copy IDs.
 
 **Create free badges.** The Badges tab has a **Create free badges** button that never spends Robux. It creates only as many of your rows as today's free count allows, and leaves the rest waiting. New badges start **inactive** (Active unticked) so players can't earn them until you enable them in the Existing grid. If you have fewer rows than that, it offers to add rows named "Badge 1", "Badge 2"… so the whole free allowance is used.
 
 **Disabled badges.** Roblox's public badge list leaves out disabled badges, so the app remembers the ID of every badge it has seen or created and looks those up individually. Disabled badges stay listed that way. For a disabled badge the app has never seen (for example one disabled before you used the app), click **Add badge by ID** and paste its ID from the Creator Dashboard or the badge's web address.
+
+**Managed pricing.** Managed pricing is Roblox's single opt-in that combines regional pricing and price optimization (automatic price tests). The app has one **Managed pricing** toggle: a checkbox in the Existing grid and a dropdown when creating. It warns before turning Managed pricing on. After saving, it reads the setting back from Roblox; if Roblox didn't apply it, the row turns red and explains. That can happen when the game hasn't done the one-time Managed Pricing opt-in in the Creator Hub (Monetization > Managed Pricing). Gift products always have it turned off.
 
 **Badges and Robux.** Each game gets a few free badges per day (UTC). After that, each badge costs 100 Robux, paid from your account (or the group's funds for a group game). The app shows the free count and asks before creating any badge that costs Robux. It also sends Roblox the `expectedCost`, so Roblox refuses the request if the real price is different.
 

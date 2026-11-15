@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -26,7 +27,7 @@ namespace RobloxProductManager
         readonly FlowLayoutPanel createBar, editBar;
         readonly Button createBtn, saveBtn;
         readonly TextBox sharedImage, filterBox;
-        readonly ComboBox regionalBox;
+        readonly ComboBox managedBox;
         readonly Label quotaLabel, countLabel;
         readonly SplitContainer split;
         bool suppress, splitPlaced;
@@ -58,6 +59,7 @@ namespace RobloxProductManager
             if (priced) newGrid.Columns.Add(TextCol("price", "Price (Robux)", 10, false));
             newGrid.Columns.Add(TextCol("description", "Description", 36, false));
             newGrid.Columns.Add(priced ? CheckCol("forSale", "For sale") : CheckCol("active", "Active"));
+            if (priced) newGrid.Columns.Add(CheckCol("giftable", "Giftable")); // also creates a "[GIFT]" developer product
             newGrid.Columns.Add(TextCol("image", "Image file", 22, false));
             newGrid.Columns.Add(ButtonCol());
             newGrid.Columns.Add(TextCol("status", "Status", 24, true));
@@ -83,11 +85,11 @@ namespace RobloxProductManager
             AddButton(createBar, "...", (s, e) => { var p = PickImage(); if (p != null) sharedImage.Text = p; });
             if (priced)
             {
-                createBar.Controls.Add(BarLabel("Regional pricing:"));
-                regionalBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130 };
-                regionalBox.Items.AddRange(new object[] { "Roblox default", "On", "Off" });
-                regionalBox.SelectedIndex = 0;
-                createBar.Controls.Add(regionalBox);
+                createBar.Controls.Add(BarLabel("Managed pricing:"));
+                managedBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130 };
+                managedBox.Items.AddRange(new object[] { "Roblox default", "On", "Off" });
+                managedBox.SelectedIndex = 0;
+                createBar.Controls.Add(managedBox);
             }
             var hint = new Label
             {
@@ -126,7 +128,7 @@ namespace RobloxProductManager
             if (priced)
             {
                 oldGrid.Columns.Add(CheckCol("forSale", "For sale"));
-                oldGrid.Columns.Add(CheckCol("regional", "Regional pricing"));
+                { var mc = CheckCol("managed", "Managed pricing"); mc.MinimumWidth = 72; oldGrid.Columns.Add(mc); }
                 oldGrid.Columns.Add(TextCol("image", "New image", 18, false));
                 oldGrid.Columns.Add(ButtonCol());
             }
@@ -157,6 +159,8 @@ namespace RobloxProductManager
                 AddButton(editBar, "Open on Roblox", (s, e) => { if (oldGrid.CurrentRow != null) OpenOnRoblox(oldGrid.CurrentRow); });
             if (kind == Kind.Badge)
                 AddButton(editBar, "Add badge by ID", async (s, e) => await AddBadgeById());
+            if (priced)
+                AddButton(editBar, "Make gift", async (s, e) => await MakeGifts());
             editBar.Controls.Add(BarLabel("Filter:"));
             filterBox = new TextBox { Width = 180 };
             filterBox.TextChanged += (s, e) => ApplyFilter();
@@ -258,8 +262,11 @@ namespace RobloxProductManager
             return newGrid.Rows.Cast<DataGridViewRow>().Where(r => !r.IsNewRow && !Done.Equals(r.Tag) && !IsBlank(r));
         }
 
+        bool addingRows; // set while many rows are added at once, so the button count updates only at the end
+
         void UpdateCreateText()
         {
+            if (addingRows) return;
             int n = PendingRows().Count();
             createBtn.Text = n > 0 ? "Create all (" + n + ")" : "Create all";
         }
@@ -271,6 +278,7 @@ namespace RobloxProductManager
         }
 
         public bool HasUnsaved { get { return oldGrid.Rows.Cast<DataGridViewRow>().Any(r => r.DefaultCellStyle.BackColor == ChangedColor); } }
+        public bool HasPendingCreates { get { return PendingRows().Any(); } }
 
         // ---------- adding rows ----------
         DataGridViewRow AddNewRow(string name, string price, string description, string image, bool forSaleWithoutPrice)
@@ -330,6 +338,9 @@ namespace RobloxProductManager
         {
             if (main.Busy) return;
             int added = 0;
+            addingRows = true;
+            try
+            {
             foreach (var raw in ClipboardText().Replace("\r\n", "\n").Split('\n'))
             {
                 if (raw.Trim() == "") continue;
@@ -339,6 +350,8 @@ namespace RobloxProductManager
                 else AddNewRow(p[0], "", string.Join(" ", p.Skip(1)), "", false);
                 added++;
             }
+            }
+            finally { addingRows = false; UpdateCreateText(); }
             main.SetStatus(added == 0
                 ? "There are no rows on the clipboard. Copy rows from Excel or Sheets (or lines like Name | Price | Description) first."
                 : "Added " + added + " row(s). Check them, then click Create all.", added == 0);
@@ -364,7 +377,9 @@ namespace RobloxProductManager
             bool onRow = hit.RowIndex >= 0 && !g.Rows[hit.RowIndex].IsNewRow && !g.Rows[hit.RowIndex].ReadOnly;
             if (files.Length == 1 && onRow) { g.Rows[hit.RowIndex].Cells["image"].Value = files[0]; return; }
             if (!isNew) { main.SetStatus("Drop one image onto the row you want to change.", true); return; }
-            foreach (var f in files) AddNewRow(Path.GetFileNameWithoutExtension(f), "", "", f, true);
+            addingRows = true;
+            try { foreach (var f in files) AddNewRow(Path.GetFileNameWithoutExtension(f), "", "", f, true); }
+            finally { addingRows = false; UpdateCreateText(); }
             main.SetStatus("Added " + files.Length + " row(s) from images. Fill in the details, then click Create all.");
         }
 
@@ -463,8 +478,8 @@ namespace RobloxProductManager
                 {
                     int extra = free - rows.Count;
                     string q = rows.Count == 0
-                        ? "This game can create " + free + " free badge(s) today.\n\nAdd " + extra + " row(s) named \"Badge 1\", \"Badge 2\"... and create them? You can rename them afterwards."
-                        : "This game can create " + free + " free badge(s) today, but only " + rows.Count + " row(s) are ready.\n\nYes: add " + extra +
+                        ? "\"" + u.Name + "\" can create " + free + " free badge(s) today.\n\nAdd " + extra + " row(s) named \"Badge 1\", \"Badge 2\"... and create them? You can rename them afterwards."
+                        : "\"" + u.Name + "\" can create " + free + " free badge(s) today, but only " + rows.Count + " row(s) are ready.\n\nYes: add " + extra +
                           " more row(s) named \"Badge 1\", \"Badge 2\"... so all free badges are used.\nNo: create just your " + rows.Count + " row(s).";
                     var answer = MessageBox.Show(this, q, "Create free badges", rows.Count == 0 ? MessageBoxButtons.OKCancel : MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
                     if (answer == DialogResult.Cancel) { main.SetStatus("Cancelled. Nothing was created."); return; }
@@ -472,12 +487,14 @@ namespace RobloxProductManager
                     {
                         var used = new HashSet<string>(newGrid.Rows.Cast<DataGridViewRow>().Where(r => !r.IsNewRow).Select(r => S(r, "name")), StringComparer.OrdinalIgnoreCase);
                         int n = 1;
+                        addingRows = true;
                         for (int i = 0; i < extra; i++)
                         {
                             while (used.Contains("Badge " + n)) n++;
                             used.Add("Badge " + n);
                             rows.Add(AddNewRow("Badge " + n, "", "", "", false));
                         }
+                        addingRows = false; UpdateCreateText();
                     }
                 }
                 if (rows.Count > free)
@@ -499,7 +516,7 @@ namespace RobloxProductManager
                 catch (ApiException ex) { main.HandleApiError(ex, "Could not check free badges, so nothing was created: "); return; }
                 int paid = Math.Max(0, rows.Count - free);
                 if (paid > 0 && MessageBox.Show(this,
-                        "This game has " + free + " free badge(s) left today.\n\n" + paid + " badge(s) will cost 100 Robux each (" + (paid * 100) +
+                        "\"" + u.Name + "\" has " + free + " free badge(s) left today.\n\n" + paid + " badge(s) will cost 100 Robux each (" + (paid * 100) +
                         " Robux total), paid from " + Payer(u) + ".\n\nCreate them?",
                         "Robux will be spent", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 {
@@ -508,9 +525,10 @@ namespace RobloxProductManager
                 }
             }
 
-            string regional = regionalBox == null || regionalBox.SelectedIndex == 0 ? "" : regionalBox.SelectedIndex == 1 ? "true" : "false";
-            int ok = 0, fail = 0;
-            bool stopped = false;
+            string managed = managedBox == null || managedBox.SelectedIndex == 0 ? "" : managedBox.SelectedIndex == 1 ? "true" : "false";
+            if (managed == "true" && !ConfirmManagedPricing(rows.Count)) { main.SetStatus("Cancelled. Nothing was created."); return; }
+            int ok = 0, fail = 0, unknown = 0, giftFail = 0;
+            bool stopped = false, giftsMade = false;
             main.SetBusy(true);
             try
             {
@@ -525,7 +543,7 @@ namespace RobloxProductManager
                         Name = S(r, "name"),
                         Description = S(r, "description"),
                         ImagePath = S(r, "image") != "" ? S(r, "image") : shared,
-                        Regional = regional,
+                        Managed = managed,
                         ForSale = B(r, "forSale"),
                         Active = B(r, "active"),
                     };
@@ -539,15 +557,56 @@ namespace RobloxProductManager
                         SetRowStatus(r, "Created" + (id != "" ? ", ID " + id : ""), 1);
                         ok++;
                         if (kind == Kind.Badge) free--;
+                        if (priced && B(r, "giftable"))
+                        {
+                            // Matching developer product for gifting: same price and icon, never regional pricing.
+                            await Task.Delay(400); // developer product creation is limited to 3 per second
+                            var gift = new NewItem
+                            {
+                                Name = "[GIFT] " + n.Name,
+                                Description = "Gift the " + n.Name + " " + (kind == Kind.Pass ? "pass" : "product") + " to a player",
+                                ImagePath = n.ImagePath,
+                                Price = n.Price,
+                                ForSale = n.ForSale,
+                                Regional = "false",
+                                Managed = "false", // Managed pricing would turn regional pricing back on
+                            };
+                            try
+                            {
+                                string giftId = await main.Api.CreateItem(Kind.Product, u, gift, 0);
+                                SetRowStatus(r, "Created, ID " + id + "; gift product ID " + giftId, 1);
+                                giftsMade = true;
+                            }
+                            catch (ApiException gex)
+                            {
+                                if (gex.SignedOut) { stopped = true; main.HandleApiError(gex, ""); break; }
+                                SetRowStatus(r, "Created, ID " + id + ", but the gift product " + (gex.Uncertain ? "may not have been created (no answer from Roblox). Reload Developer Products to check." : "failed: " + gex.Message) +
+                                    " To retry, select this item in Existing and click Make gift.", 2);
+                                giftFail++;
+                            }
+                        }
                     }
                     catch (ApiException ex)
                     {
                         if (ex.SignedOut) { stopped = true; main.HandleApiError(ex, ""); break; }
-                        SetRowStatus(r, ex.Message, 2);
-                        fail++;
+                        if (ex.Uncertain)
+                        {
+                            // Roblox may have created it: never retry this row automatically.
+                            r.Tag = Done;
+                            r.ReadOnly = true;
+                            SetRowStatus(r, ex.Message + " This row won't be created again; remove it if it's missing.", 2);
+                            if (kind == Kind.Badge) free--; // assume the free badge was used, so later costs are never under-estimated
+                            unknown++;
+                        }
+                        else
+                        {
+                            SetRowStatus(r, FriendlyError(ex), 2);
+                            fail++;
+                        }
                     }
                     catch (IOException ex) { SetRowStatus(r, "Could not read the image: " + ex.Message, 2); fail++; }
                     catch (UnauthorizedAccessException ex) { SetRowStatus(r, "Could not read the image: " + ex.Message, 2); fail++; }
+                    catch (Exception ex) { SetRowStatus(r, "Unexpected error: " + ex.Message, 2); if (!Done.Equals(r.Tag)) fail++; } // one bad row must not stop the rest
                     await Task.Delay(GapMs);
                 }
             }
@@ -557,8 +616,45 @@ namespace RobloxProductManager
                 UpdateCreateText();
             }
             if (stopped) return;
-            main.SetStatus("Done. " + ok + " created" + (fail > 0 ? ", " + fail + " failed. Fix those rows and click Create all again." : "."), fail > 0);
-            if (ok > 0) await LoadList();
+            if (needsManagedOptIn) OfferManagedOptIn(u);
+            main.SetStatus("Done. " + ok + " created" +
+                (fail > 0 ? ", " + fail + " failed (fix those rows and click Create all again)" : "") +
+                (unknown > 0 ? ", " + unknown + " unknown (no answer from Roblox; check after the reload)" : "") +
+                (giftFail > 0 ? ", " + giftFail + " gift product(s) failed (see the red rows)" : "") + ".", fail + unknown + giftFail > 0);
+            if (giftsMade && kind == Kind.Pass) main.MarkStale(Kind.Product); // gift products appear in the Developer Products tab
+            if (ok + unknown > 0) await LoadList();
+        }
+
+        // Set when Roblox says Managed pricing hasn't been accepted for the game yet (a one-time step in the Creator Hub).
+        bool needsManagedOptIn;
+
+        string FriendlyError(ApiException ex)
+        {
+            if (ex.Message.IndexOf("Managed pricing must be accepted", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                needsManagedOptIn = true;
+                return "Managed pricing isn't accepted for this game yet. Accept it once in the Creator Hub (Monetization > Managed Pricing), then try again.";
+            }
+            return ex.Message;
+        }
+
+        void OfferManagedOptIn(Universe u)
+        {
+            needsManagedOptIn = false;
+            if (MessageBox.Show(this,
+                    "Roblox won't turn on Managed pricing until it has been accepted for this game. That is a one-time step on Roblox's website and can't be done from this app.\n\n" +
+                    "Open this game's Managed Pricing page in the Creator Hub now? Accept it there, then save again here.",
+                    "Accept Managed pricing first", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                Browser.Open("https://create.roblox.com/dashboard/creations/experiences/" + u.Id + "/monetization/managed-pricing");
+        }
+
+        bool ConfirmManagedPricing(int count)
+        {
+            return MessageBox.Show(this,
+                "Turn on Managed pricing for " + count + " item(s)?\n\n" +
+                "Managed pricing turns on regional pricing and lets Roblox run automatic price tests " +
+                "(price optimization) on these items. You can review or reschedule tests in the Creator Hub under Monetization > Managed Pricing.",
+                "Managed pricing", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
         }
 
         static string Payer(Universe u) { return u.IsGroup ? "the group's funds" : "your account"; }
@@ -581,8 +677,8 @@ namespace RobloxProductManager
                     long v;
                     if (TryWhole(p, out v)) c.Price = v;
                 }
-                bool rg = B(r, "regional");
-                if (rg != it.Regional) c.Regional = rg;
+                bool mg = B(r, "managed");
+                if (mg != it.Managed) c.Managed = mg;
                 if (S(r, "image") != "") c.ImagePath = S(r, "image");
             }
             else
@@ -610,8 +706,10 @@ namespace RobloxProductManager
             int bad = 0;
             foreach (var r in rows) { string v = ValidateRow(r, ""); SetRowStatus(r, v, v != "" ? 2 : 0); if (v != "") bad++; }
             if (bad > 0) { main.SetStatus("Fix the " + bad + " row(s) marked in red.", true); return; }
+            int turningOn = priced ? rows.Count(r => Diff(r).Managed == true) : 0;
+            if (turningOn > 0 && !ConfirmManagedPricing(turningOn)) { main.SetStatus("Cancelled. Nothing was saved."); return; }
 
-            int ok = 0, fail = 0;
+            int ok = 0, fail = 0, regionalIgnored = 0;
             bool stopped = false;
             main.SetBusy(true);
             try
@@ -625,7 +723,33 @@ namespace RobloxProductManager
                     try
                     {
                         bool newImage = priced && S(r, "image") != "";
-                        await main.Api.UpdateItem(kind, u.Id, it.Id, Diff(r));
+                        var changes = Diff(r);
+                        await main.Api.UpdateItem(kind, u.Id, it.Id, changes);
+                        bool pricingMismatch = false;
+                        if (changes.Managed.HasValue)
+                        {
+                            // Roblox can report success without applying pricing settings, so read them back.
+                            Item actual;
+                            try { actual = await main.Api.ReadPricing(kind, u.Id, it.Id); }
+                            catch (ApiException rex)
+                            {
+                                if (rex.SignedOut) throw;
+                                actual = null; // saved, but couldn't double-check
+                            }
+                            if (actual == null) actual = new Item { Managed = changes.Managed.Value };
+                            var problems = new List<string>();
+                            if (changes.Managed.HasValue && actual.Managed != changes.Managed.Value)
+                                problems.Add("Managed pricing " + (changes.Managed.Value ? "on" : "off") + ". The game may need the one-time Managed Pricing opt-in in the Creator Hub (Monetization > Managed Pricing)");
+                            if (problems.Count > 0)
+                            {
+                                SetRowStatus(r, "Other changes saved, but Roblox did not turn " + string.Join(" or ", problems), 2);
+                                regionalIgnored++;
+                                pricingMismatch = true;
+                            }
+                            suppress = true;
+                            r.Cells["managed"].Value = actual.Managed;
+                            suppress = false;
+                        }
                         if (newImage) IconRefreshed.Remove(IconKey(it)); // fetch the new icon on the next load and overwrite the cached file
                         // Remember what was saved, so the row is no longer "changed".
                         suppress = true;
@@ -636,23 +760,24 @@ namespace RobloxProductManager
                             long v;
                             it.Price = TryWhole(S(r, "price"), out v) ? v : (long?)null;
                             it.ForSale = B(r, "forSale");
-                            it.Regional = B(r, "regional");
+                            it.Managed = B(r, "managed");
                             r.Cells["image"].Value = "";
                         }
                         else it.Enabled = B(r, "enabled");
                         suppress = false;
                         r.DefaultCellStyle.BackColor = Color.Empty;
-                        SetRowStatus(r, "Saved", 1);
+                        if (!pricingMismatch) SetRowStatus(r, "Saved", 1);
                         ok++;
                     }
                     catch (ApiException ex)
                     {
                         if (ex.SignedOut) { stopped = true; main.HandleApiError(ex, ""); break; }
-                        SetRowStatus(r, ex.Message, 2);
+                        SetRowStatus(r, FriendlyError(ex), 2);
                         fail++;
                     }
                     catch (IOException ex) { SetRowStatus(r, "Could not read the image: " + ex.Message, 2); fail++; }
                     catch (UnauthorizedAccessException ex) { SetRowStatus(r, "Could not read the image: " + ex.Message, 2); fail++; }
+                    catch (Exception ex) { SetRowStatus(r, "Unexpected error: " + ex.Message, 2); fail++; } // one bad row must not stop the rest
                     await Task.Delay(GapMs);
                 }
             }
@@ -663,7 +788,9 @@ namespace RobloxProductManager
                 UpdateSaveText();
             }
             if (stopped) return;
+            if (needsManagedOptIn) OfferManagedOptIn(u);
             if (fail > 0) { main.SetStatus(ok + " saved, " + fail + " failed. Fix the red rows and click Save changes again.", true); return; }
+            if (regionalIgnored > 0) { main.SetStatus("Saved " + ok + " change(s), but Roblox ignored a pricing setting on " + regionalIgnored + " item(s). See the red rows.", true); return; }
             await LoadList(); // re-read from Roblox so the grid shows what was really saved
             main.SetStatus("Saved " + ok + " change(s).");
         }
@@ -727,36 +854,65 @@ namespace RobloxProductManager
         // which overwrites the cached file with the same name.
         async Task LoadIcons(List<Item> items, int seq)
         {
-            foreach (var it in items)
+            // 1) Disk cache, read off the UI thread so big lists don't freeze the window.
+            var fromDisk = items.Where(it => !IconCache.ContainsKey(IconKey(it))).Select(it => new { Key = IconKey(it), Path = IconFile(it) }).ToList();
+            if (fromDisk.Count > 0)
             {
-                if (IconCache.ContainsKey(IconKey(it))) continue;
-                var cached = File.Exists(IconFile(it)) ? ReadImage(IconFile(it)) : null;
-                if (cached != null) IconCache[IconKey(it)] = cached;
+                var loaded = await Task.Run(() => fromDisk.Select(x => new { x.Key, Img = File.Exists(x.Path) ? ReadImage(x.Path) : null }).ToList());
+                foreach (var x in loaded)
+                {
+                    if (x.Img == null) continue;
+                    if (IconCache.ContainsKey(x.Key)) x.Img.Dispose(); // another load got there first
+                    else IconCache[x.Key] = x.Img;
+                }
             }
+            if (seq != loadSeq) return;
             ShowIcons(seq);
 
+            // 2) A fresh copy from Roblox once per session, 4 downloads at a time.
             var stale = items.Where(it => !IconRefreshed.Contains(IconKey(it)) && (kind != Kind.Product || it.IconAssetId != "" && it.IconAssetId != "0")).ToList();
             if (stale.Count == 0) return;
             Dictionary<string, string> urls;
             try { urls = await main.Api.IconUrls(kind, stale.Select(it => kind == Kind.Product ? it.IconAssetId : it.Id).Distinct().ToList()); }
             catch (ApiException) { return; } // icons are optional; cached ones stay
-            foreach (var it in stale)
+            var gate = new SemaphoreSlim(4);
+            await Task.WhenAll(stale.Select(async it =>
             {
-                if (seq != loadSeq) return;
                 string url;
-                if (!urls.TryGetValue(kind == Kind.Product ? it.IconAssetId : it.Id, out url)) continue;
-                var img = await main.Api.DownloadImage(url, IconSize);
-                if (img == null) continue;
-                IconCache[IconKey(it)] = img;
-                IconRefreshed.Add(IconKey(it));
+                if (!urls.TryGetValue(kind == Kind.Product ? it.IconAssetId : it.Id, out url)) return;
+                await gate.WaitAsync();
                 try
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(IconFile(it)));
-                    img.Save(IconFile(it), System.Drawing.Imaging.ImageFormat.Png); // overwrites any icon with the same name
+                    if (seq != loadSeq) return;
+                    var img = await main.Api.DownloadImage(url, IconSize);
+                    if (img == null) return;
+                    SetIcon(IconKey(it), img);
+                    IconRefreshed.Add(IconKey(it));
+                    try
+                    {
+                        Directory.CreateDirectory(Path.GetDirectoryName(IconFile(it)));
+                        img.Save(IconFile(it), System.Drawing.Imaging.ImageFormat.Png); // overwrites any icon with the same name
+                    }
+                    catch (Exception) { /* cache is optional */ }
                 }
-                catch (Exception) { /* cache is optional */ }
-                ShowIcons(seq);
+                finally { gate.Release(); }
+            }));
+            gate.Dispose();
+        }
+
+        // Puts a new icon in the cache, points any grid cells at it, then frees the old bitmap.
+        void SetIcon(string key, Image img)
+        {
+            Image old;
+            IconCache.TryGetValue(key, out old);
+            IconCache[key] = img;
+            foreach (DataGridViewRow r in oldGrid.Rows)
+            {
+                var it = r.Tag as Item;
+                if (it != null && IconKey(it) == key) r.Cells["icon"].Value = img;
+                else if (old != null && ReferenceEquals(r.Cells["icon"].Value, old)) r.Cells["icon"].Value = img;
             }
+            if (old != null && !ReferenceEquals(old, img)) old.Dispose();
         }
 
         void ShowIcons(int seq)
@@ -784,7 +940,7 @@ namespace RobloxProductManager
                 {
                     r.Cells["price"].Value = it.Price.HasValue ? it.Price.Value.ToString(CultureInfo.InvariantCulture) : "";
                     r.Cells["forSale"].Value = it.ForSale;
-                    r.Cells["regional"].Value = it.Regional;
+                    r.Cells["managed"].Value = it.Managed;
                     r.Cells["image"].Value = "";
                 }
                 else r.Cells["enabled"].Value = it.Enabled;
@@ -811,6 +967,85 @@ namespace RobloxProductManager
             }
         }
 
+        // Creates a "[GIFT] <name>" developer product for each selected existing pass/product:
+        // same price, the item's current icon, regional pricing always off. Skips items that already have one.
+        async Task MakeGifts()
+        {
+            var u = main.Game;
+            if (u == null || main.Busy) return;
+            var rows = oldGrid.SelectedCells.Cast<DataGridViewCell>().Select(c => c.OwningRow)
+                .Concat(oldGrid.SelectedRows.Cast<DataGridViewRow>()).Distinct()
+                .Where(r => r.Tag is Item).OrderBy(r => r.Index).ToList();
+            if (rows.Count == 0) { main.SetStatus("Select the rows you want gift products for (click a cell, or Ctrl+click several), then click Make gift.", true); return; }
+            string what = kind == Kind.Pass ? "pass" : "product";
+            if (MessageBox.Show(this, "Create a \"[GIFT]\" developer product for " + rows.Count + " selected " + what + (rows.Count == 1 ? "" : "es").Replace("productes", "products") +
+                    "?\n\nEach gift gets the same price and icon, and regional pricing off.", "Make gift", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+            main.SetBusy(true);
+            int ok = 0, skipped = 0, fail = 0;
+            bool stopped = false;
+            try
+            {
+                main.SetStatus("Checking existing gift products...");
+                var existing = await main.Api.ListItems(Kind.Product, u.Id);
+                var giftNames = new HashSet<string>(existing.Select(p => p.Name.Trim()), StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    var r = rows[i];
+                    var it = (Item)r.Tag;
+                    string giftName = "[GIFT] " + it.Name.Trim();
+                    if (it.Name.StartsWith("[GIFT]", StringComparison.OrdinalIgnoreCase)) { SetRowStatus(r, "Skipped: this is already a gift product", 0); skipped++; continue; }
+                    if (giftNames.Contains(giftName)) { SetRowStatus(r, "Skipped: \"" + giftName + "\" already exists", 0); skipped++; continue; }
+                    main.SetStatus("Making gift " + (i + 1) + " of " + rows.Count + "...");
+                    SetRowStatus(r, "Making gift...", 0);
+                    string icon = null;
+                    try
+                    {
+                        string iconId = kind == Kind.Product ? it.IconAssetId : it.Id;
+                        if (iconId != "" && iconId != "0")
+                        {
+                            var urls = await main.Api.IconUrls(kind, new List<string> { iconId });
+                            string url;
+                            if (urls.TryGetValue(iconId, out url)) icon = await main.Api.DownloadToTemp(url, "gift-" + it.Id);
+                        }
+                        var gift = new NewItem
+                        {
+                            Name = giftName,
+                            Description = "Gift the " + it.Name.Trim() + " " + what + " to a player",
+                            ImagePath = icon ?? "",
+                            Price = it.Price ?? 1,
+                            ForSale = true,
+                            Regional = "false", // gifts never use regional pricing
+                            Managed = "false",  // Managed pricing would turn regional pricing back on
+                        };
+                        string giftId = await main.Api.CreateItem(Kind.Product, u, gift, 0);
+                        giftNames.Add(giftName);
+                        SetRowStatus(r, "Gift product created, ID " + giftId + (icon == null ? " (no icon found to copy)" : ""), 1);
+                        ok++;
+                    }
+                    catch (ApiException ex)
+                    {
+                        if (ex.SignedOut) { stopped = true; main.HandleApiError(ex, ""); break; }
+                        SetRowStatus(r, ex.Uncertain ? "No answer from Roblox, so the gift may or may not exist. Reload Developer Products to check before trying again." : "Gift failed: " + ex.Message, 2);
+                        if (ex.Uncertain) giftNames.Add(giftName); // never make a second one in this run
+                        fail++;
+                    }
+                    catch (Exception ex) { SetRowStatus(r, "Gift failed (unexpected error): " + ex.Message, 2); fail++; }
+                    finally { if (icon != null) try { File.Delete(icon); } catch (Exception) { } }
+                    await Task.Delay(400); // developer product creation is limited to 3 per second
+                }
+            }
+            catch (ApiException ex) { stopped = true; main.HandleApiError(ex, "Could not check existing products, so no gifts were made: "); }
+            finally { main.SetBusy(false); }
+            if (stopped) return;
+            main.SetStatus("Gifts: " + ok + " created" + (skipped > 0 ? ", " + skipped + " skipped" : "") + (fail > 0 ? ", " + fail + " failed" : "") + ".", fail > 0);
+            if (ok > 0)
+            {
+                if (kind == Kind.Pass) main.MarkStale(Kind.Product);
+                else await LoadList();
+            }
+        }
+
         // Disabled badges don't appear in Roblox's public list. Add one by ID (from the Creator Dashboard) so it can be edited here.
         async Task AddBadgeById()
         {
@@ -824,11 +1059,16 @@ namespace RobloxProductManager
                 .Select(x => new string(x.Where(char.IsDigit).ToArray())).Where(x => x != "").Distinct().ToList();
             int added = 0;
             var problems = new List<string>();
-            foreach (var id in ids)
+            main.SetBusy(true); // nothing else may change the lists meanwhile
+            try
             {
-                try { await main.Api.GetBadge(u.Id, id); main.Api.RememberBadge(u.Id, id); added++; }
-                catch (ApiException ex) { problems.Add(id + ": " + (ex.Status == 404 ? "not found" : ex.Message)); }
+                foreach (var id in ids)
+                {
+                    try { await main.Api.GetBadge(u.Id, id); main.Api.RememberBadge(u.Id, id); added++; }
+                    catch (ApiException ex) { if (ex.SignedOut) { main.HandleApiError(ex, ""); return; } problems.Add(id + ": " + (ex.Status == 404 ? "not found" : ex.Message)); }
+                }
             }
+            finally { main.SetBusy(false); }
             if (added > 0) await LoadList();
             main.SetStatus((added > 0 ? "Added " + added + " badge(s). " : "") + (problems.Count > 0 ? "Not added: " + string.Join("; ", problems) : ""), problems.Count > 0);
         }
