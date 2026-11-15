@@ -58,6 +58,15 @@ namespace RobloxProductManager
         public bool ForSale, Active;
     }
 
+    // A Marketplace avatar item (classic clothing or accessory) read with an API key.
+    class MarketItem
+    {
+        public string Id = "", Name = "", Description = "", CollectibleItemId = "", Moderation = "";
+        public int AssetType;
+        public long? Price;
+        public bool OnSale, Free; public bool Resellable;
+    }
+
     class ItemChanges
     {
         public string Name, Description, ImagePath;
@@ -352,13 +361,14 @@ namespace RobloxProductManager
 #if TESTHOOKS
         // Test builds only (build with /define:TESTHOOKS): talk to a local fake Roblox server instead.
         static readonly string TestRoot = Environment.GetEnvironmentVariable("RPM_TEST_ROOT");
-        static readonly string OAuth = TestRoot + "/oauth/v1", Apis = TestRoot, BadgesApi = TestRoot + "/badges", GamesApi = TestRoot + "/games", ThumbsApi = TestRoot + "/thumbs";
+        static readonly string OAuth = TestRoot + "/oauth/v1", Apis = TestRoot, BadgesApi = TestRoot + "/badges", GamesApi = TestRoot + "/games", ThumbsApi = TestRoot + "/thumbs", ItemConfigApi = TestRoot + "/itemconfig";
 #else
         const string OAuth = "https://apis.roblox.com/oauth/v1";
         const string Apis = "https://apis.roblox.com";
         const string BadgesApi = "https://badges.roblox.com";
         const string GamesApi = "https://games.roblox.com";
         const string ThumbsApi = "https://thumbnails.roblox.com";
+        const string ItemConfigApi = "https://itemconfiguration.roblox.com"; // Marketplace items (API key only)
 #endif
         readonly Settings settings;
         readonly HttpClient http;
@@ -610,7 +620,7 @@ namespace RobloxProductManager
                     var d = await BadgePage(BadgesApi + "/v1/universes/" + universe + "/badges?limit=100&sortOrder=Asc" +
                         (token != "" ? "&cursor=" + E(token) : ""));
                     foreach (var b in J.A(d, "data"))
-                        list.Add(new Item { Id = J.Str(b, "id"), Name = J.Str(b, "name"), Description = J.Str(b, "description"), Enabled = J.B(b, "enabled") });
+                        list.Add(new Item { Id = J.Str(b, "id"), Name = J.Str(b, "name"), Description = J.Str(b, "description"), Enabled = J.B(b, "enabled"), IconAssetId = J.Str(b, "iconImageId") });
                     token = J.Str(d, "nextPageCursor");
                 }
                 else
@@ -777,6 +787,115 @@ namespace RobloxProductManager
             return n;
         }
 
+        // ---------- Marketplace items (Clothing & Accessories tab; Roblox API key, not OAuth) ----------
+        // These itemconfiguration endpoints only accept an API key (x-api-key) with "Marketplace items" permissions.
+        public bool HasApiKey { get { return settings.ApiKey != ""; } }
+
+        async Task<object> SendWithKey(HttpMethod method, string url, string json)
+        {
+            if (settings.ApiKey == "") throw new ApiException(0, "Set your Roblox API key first (Set API key).");
+            for (int attempt = 1; ; attempt++)
+            {
+                using (var req = new HttpRequestMessage(method, url))
+                {
+                    req.Headers.Add("x-api-key", settings.ApiKey);
+                    if (json != null) req.Content = new StringContent(json, Encoding.UTF8, "application/json");
+                    HttpResponseMessage resp;
+                    try { resp = await http.SendAsync(req); }
+                    catch (HttpRequestException) { throw MaybeDone(Offline(), method); }
+                    catch (TaskCanceledException) { throw MaybeDone(TooSlow(), method); }
+                    using (resp)
+                    {
+                        int status = (int)resp.StatusCode;
+                        if (status == 429 && attempt < 3) { await Task.Delay(RetryDelay(resp, attempt)); continue; }
+                        if (status >= 500 && method == HttpMethod.Get && attempt < 3) { await Task.Delay(TimeSpan.FromSeconds(attempt)); continue; }
+                        string text = await resp.Content.ReadAsStringAsync();
+                        if (!resp.IsSuccessStatusCode) throw new ApiException(status, KeyError(J.Describe(text, status), status));
+                        try { return J.Parse(text); } catch (ArgumentException) { return text; }
+                    }
+                }
+            }
+        }
+
+        static string KeyError(string message, int status)
+        {
+            if (message.IndexOf("Invalid API Key", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Roblox rejected the API key. Check it under Set API key, or create a new one (Marketplace items: Read and Write).";
+            if (message.IndexOf("IP", StringComparison.Ordinal) >= 0 && message.IndexOf("not", StringComparison.OrdinalIgnoreCase) >= 0)
+                return message + " Your internet address may have changed: update Accepted IP Addresses on the key, or turn IP restriction off.";
+            if (status == 401 || status == 403)
+                return message + " The key may be missing the Marketplace items permission (Read to list, Write to edit), or your group role can't manage this group's items.";
+            return message;
+        }
+
+        static string CreatorQuery(string groupId) { return groupId != "" ? "&groupId=" + Uri.EscapeDataString(groupId) : ""; }
+
+        // Lists items of the given asset types (e.g. 2 T-Shirt, 11 Shirt, 12 Pants, 8 Hat...) for you or a group.
+        public async Task<List<MarketItem>> ListMarketItems(IEnumerable<int> assetTypes, string groupId)
+        {
+            var list = new List<MarketItem>();
+            foreach (int type in assetTypes)
+            {
+                string cursor = "";
+                for (int page = 0; page < 100; page++)
+                {
+                    var d = await SendWithKey(HttpMethod.Get, ItemConfigApi + "/v1/items/by-creator?assetType=" + type + CreatorQuery(groupId) +
+                        (cursor != "" ? "&cursor=" + E(cursor) : ""), null);
+                    foreach (var x in J.A(d, "items"))
+                    {
+                        long sale = J.L(x, "saleStatus") ?? 1;
+                        list.Add(new MarketItem
+                        {
+                            Id = J.Str(x, "id"),
+                            Name = J.Str(x, "name"),
+                            Description = J.Str(x, "description"),
+                            AssetType = (int)(J.L(J.G(J.G(x, "marketplaceItemDetails"), "assetDetails"), "assetType") ?? type),
+                            Price = J.L(x, "price"),
+                            OnSale = sale == 0 || sale == 2,
+                            Free = sale == 2,
+                            CollectibleItemId = J.Str(J.G(x, "collectibleDetails"), "collectibleItemId"),
+                            Resellable = J.B(J.G(x, "collectibleDetails"), "isResellable"),
+                            Moderation = ModerationName(J.L(x, "moderationStatus")),
+                        });
+                    }
+                    cursor = J.Str(d, "nextCursor"); if (cursor == "") cursor = J.Str(d, "nextPageCursor");
+                    if (cursor == "") break;
+                }
+            }
+            return list;
+        }
+
+        static string ModerationName(long? s)
+        {
+            switch (s ?? 0) { case 1: return "Pending"; case 2: return "Moderated"; case 3: return "Approved"; case 4: return "Needs attention"; default: return ""; }
+        }
+
+        // Name and description (both are always sent).
+        public async Task UpdateMarketDisplay(string assetId, string name, string description)
+        {
+            // Roblox answers "Missing/Null request parameters" unless both name and description are sent, so always send both.
+            var d = new Dictionary<string, object> { { "targetType", 0 }, { "targetId", assetId }, { "name", name ?? "" }, { "description", description ?? "" } };
+            await SendWithKey(new HttpMethod("PATCH"), ItemConfigApi + "/v1/collectibles/update-item-display-information", J.S.Serialize(d));
+        }
+
+        // Price and/or sale status of an item published into the collectible system.
+        public async Task UpdateMarketSale(string collectibleItemId, bool onSale, long? price, bool resellable)
+        {
+            // Tested against Roblox: it answers "Missing/Null request parameters" without saleLocationConfiguration and
+            // "Invalid resale restriction" without resaleRestriction. Sale location 1 = catalog and all experiences.
+            var d = new Dictionary<string, object>
+            {
+                { "saleStatus", onSale ? 0 : 1 },
+                { "saleLocationConfiguration", new Dictionary<string, object> { { "saleLocationType", 1 }, { "places", new long[0] } } },
+                { "resaleRestriction", resellable ? 1 : 2 }, // 1 = resale allowed, 2 = disabled: keeps the current setting
+            };
+            // Always send the free flag and price explicitly; Roblox rejects some requests with "Missing/Null request parameters".
+            bool free = price.HasValue && price.Value == 0;
+            d["isFree"] = free;
+            if (!free && price.HasValue) d["priceInRobux"] = price.Value;
+            await SendWithKey(new HttpMethod("PATCH"), ItemConfigApi + "/v1/collectibles/" + E(collectibleItemId), J.S.Serialize(d));
+        }
+
         // ---------- thumbnails (public, no sign-in needed) ----------
         // ids: game pass IDs, badge IDs, or (developer products) icon image asset IDs. Returns id -> image URL.
         public async Task<Dictionary<string, string>> IconUrls(Kind kind, IList<string> ids)
@@ -793,6 +912,17 @@ namespace RobloxProductManager
                     if (J.Str(t, "state") == "Completed" && J.Str(t, "imageUrl") != "") urls[J.Str(t, "targetId")] = J.Str(t, "imageUrl");
             }
             return urls;
+        }
+
+        // One large icon for the hover preview. Asset images come in 420x420; game pass and badge thumbnails only in 150x150.
+        public async Task<string> LargeIconUrl(Kind kind, string id)
+        {
+            string url = kind == Kind.Pass ? ThumbsApi + "/v1/game-passes?gamePassIds=" + E(id) + "&size=150x150"
+                : kind == Kind.Badge ? ThumbsApi + "/v1/badges/icons?badgeIds=" + E(id) + "&size=150x150"
+                : ThumbsApi + "/v1/assets?assetIds=" + E(id) + "&size=420x420";
+            var d = await Send(HttpMethod.Get, url + "&format=Png", null, false);
+            var first = J.A(d, "data").FirstOrDefault();
+            return J.Str(first, "state") == "Completed" ? J.Str(first, "imageUrl") : "";
         }
 
         public async Task<string> HeadshotUrl(string userId)

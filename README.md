@@ -102,6 +102,19 @@ For passes and products that already exist, select their rows in the Existing gr
 
 ---
 
+## Clothing and Accessories tab
+
+Lists and edits your own (or a group's) classic clothing, accessories and layered clothing: name, description, price and on-sale. Roblox only lets an **API key** do this, not OAuth, so the tab works without a game selected:
+
+1. In the Creator Dashboard, open **API Keys** and create a key **on your own account** (group keys have no Marketplace permissions).
+2. Add the **Marketplace items** permission with **Read** (to list) and **Write** (to edit). Don't add Publish, which can spend Robux.
+3. In the app, click **Set API key** and paste it. It is stored encrypted for your Windows account (DPAPI).
+4. For group items, type the group ID. Your group role must be allowed to manage the group's items.
+
+Select rows and click **Put on sale** or **Take off sale** to change sale status in one step (it asks before putting anything on sale). Saving a price or sale change sets the sale location to the catalog and all experiences, which Roblox requires on every such request.
+
+Price and sale can only be changed for items in Roblox's current collectible system; older items show a note instead. New clothing and accessories still have to be uploaded in the Creator Hub.
+
 ## Build the app yourself
 
 Double-click **`build.cmd`**, or run:

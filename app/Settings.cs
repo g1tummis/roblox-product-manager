@@ -22,6 +22,9 @@ namespace RobloxProductManager
         const string FileVersion = "2.1";
 
         public string ClientId = BuiltInClientId, ClientSecret = "", Scopes = DefaultScopes, RefreshToken = "", LastUniverse = "";
+        // Clothing & Accessories tab: a Roblox API key with Marketplace items permissions (encrypted like the refresh token).
+        public string ApiKey = "", MarketGroup = "";
+        public int MarketFilter;
         public int Port = 3000;
 
         // Badge IDs seen per game. Roblox's public badge list hides disabled badges,
@@ -64,6 +67,9 @@ namespace RobloxProductManager
                 s.ClientSecret = Unprotect(J.Str(d, "clientSecret"));
                 s.RefreshToken = Unprotect(J.Str(d, "refreshToken"));
                 s.LastUniverse = J.Str(d, "lastUniverse");
+                s.ApiKey = Unprotect(J.Str(d, "apiKey"));
+                s.MarketGroup = J.Str(d, "marketGroup");
+                int mf; if (int.TryParse(J.Str(d, "marketFilter"), out mf)) s.MarketFilter = mf;
                 if (J.Str(d, "scopes") != "") s.Scopes = J.Str(d, "scopes");
                 if (s.ClientId == BuiltInClientId || Array.IndexOf(PreviousBuiltInClientIds, s.ClientId) >= 0) s.Scopes = DefaultScopes; // the built-in app always asks for the current scopes
                 int port;
@@ -108,6 +114,9 @@ namespace RobloxProductManager
                 { "scopes", Scopes },
                 { "refreshToken", Protect(RefreshToken) },
                 { "lastUniverse", LastUniverse },
+                { "apiKey", Protect(ApiKey) },
+                { "marketGroup", MarketGroup },
+                { "marketFilter", MarketFilter },
                 { "knownBadges", knownBadges.Where(p => p.Value.Count > 0).ToDictionary(p => p.Key, p => p.Value.ToArray()) },
             };
             // Write to a temporary file first, then swap it in, so a crash mid-write can't corrupt the settings.

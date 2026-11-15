@@ -13,6 +13,7 @@ namespace RobloxProductManager
         readonly Settings settings;
         readonly RobloxClient api;
         readonly List<KindPanel> panels = new List<KindPanel>();
+        MarketPanel market; // "Clothing & Accessories" tab (last tab; uses an API key, not the selected game)
         Panel signedOutPanel, mainPanel, loadingPanel;
         Label loadingLabel;
         Button signInBtn;
@@ -163,6 +164,10 @@ namespace RobloxProductManager
                 panels.Add(p);
                 tabs.TabPages.Add(page);
             }
+            var marketPage = new TabPage("Clothing and Accessories") /* "&" throws off the tab's padding */ { Padding = new Padding(4), UseVisualStyleBackColor = true };
+            market = new MarketPanel(this, settings);
+            marketPage.Controls.Add(market);
+            tabs.TabPages.Add(marketPage);
             tabs.SelectedIndexChanged += async (s, e) => await EnsureLoaded();
 
             mainPanel.Controls.Add(tabs);
@@ -190,6 +195,7 @@ namespace RobloxProductManager
             topBar.Enabled = !on;
             settingsLink.Enabled = !on;
             foreach (var p in panels) p.SetBusy(on);
+            market.SetBusy(on);
             progress.Visible = on;
         }
 
@@ -204,7 +210,7 @@ namespace RobloxProductManager
             else SetStatus(prefix + ex.Message, true);
         }
 
-        bool HasUnsaved() { return panels.Any(p => p.HasUnsaved); }
+        bool HasUnsaved() { return panels.Any(p => p.HasUnsaved) || market.HasUnsaved; }
 
         // Makes a tab reload its list the next time it is shown (panels are in Kind order).
         public void MarkStale(Kind k) { panels[(int)k].LoadedFor = null; }
@@ -283,6 +289,7 @@ namespace RobloxProductManager
             settingsLink.Enabled = !on;
             topBar.Enabled = !on;
             foreach (var p in panels) p.Enabled = !on;
+            market.Enabled = !on;
             waitingLabel.Text = text;
             waitingLabel.Visible = on && text != "";
             cancelSignIn.Visible = on && signInCts != null;
@@ -322,7 +329,7 @@ namespace RobloxProductManager
         {
             if (Busy || signInCts != null) return;
             if (!settings.Complete && !OpenSetup(true)) return;
-            if (chooseGames && HasUnsaved() && !Ask("You have unsaved edits. Continue and throw them away?")) return;
+            if (chooseGames && panels.Any(p => p.HasUnsaved) && !Ask("You have unsaved edits. Continue and throw them away?")) return;
             bool fromMain = mainPanel.Visible;
             signInCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
             SetSigningIn(true, "Waiting for you to approve on Roblox in your web browser. Come back here when you're done.\n" +
@@ -371,7 +378,7 @@ namespace RobloxProductManager
             suppressGameChange = false;
 
             noGamesLabel.Visible = list.Count == 0;
-            tabs.Visible = list.Count > 0;
+            tabs.Visible = true; // the Clothing & Accessories tab works without any game
             OnGameChanged(true);
             SetStatus(list.Count == 0 ? "No games are shared with this app yet." : list.Count + (list.Count == 1 ? " game" : " games") + " available.");
         }
@@ -382,7 +389,7 @@ namespace RobloxProductManager
             var g = Game;
             string id = g != null ? g.Id : null;
             if (id == currentGameId) return;
-            if (!fromReload && HasUnsaved() && !Ask("You have unsaved edits. Switch game and throw them away?"))
+            if (!fromReload && panels.Any(p => p.HasUnsaved) && !Ask("You have unsaved edits. Switch game and throw them away?"))
             {
                 suppressGameChange = true;
                 gameBox.SelectedIndex = gameBox.Items.Cast<Universe>().ToList().FindIndex(u => u.Id == currentGameId);
@@ -401,6 +408,7 @@ namespace RobloxProductManager
 
         async Task EnsureLoaded()
         {
+            if (tabs.SelectedIndex >= panels.Count) { await market.ShowTab(); return; }
             var g = Game;
             if (g == null || tabs.SelectedIndex < 0) return;
             var p = panels[tabs.SelectedIndex];

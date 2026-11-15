@@ -121,6 +121,14 @@ namespace RobloxProductManager
                 Name = "icon", HeaderText = "Icon", Width = IconSize + 12, AutoSizeMode = DataGridViewAutoSizeColumnMode.None,
                 ImageLayout = DataGridViewImageCellLayout.Zoom, ReadOnly = true, DefaultCellStyle = { NullValue = null },
             });
+            // Hover an icon for a big preview: the icon image asset (420x420) when known, else the pass/badge thumbnail.
+            IconPreview.Attach(oldGrid, () => main.Api, row =>
+            {
+                var it = row.Tag as Item;
+                if (it == null) return null;
+                if (it.IconAssetId != "" && it.IconAssetId != "0") return Tuple.Create(Kind.Product, it.IconAssetId);
+                return kind == Kind.Product ? null : Tuple.Create(kind, it.Id);
+            });
             oldGrid.Columns.Add(TextCol("id", "ID", 12, true));
             oldGrid.Columns.Add(TextCol("name", "Name", 26, false));
             if (priced) oldGrid.Columns.Add(TextCol("price", "Price (Robux)", 10, false));
