@@ -172,3 +172,8 @@ The flow is the **authorization code flow with PKCE**, which Roblox recommends f
 | `.env.example` | Settings template for the web version |
 
 The app's C# code contains test hooks used only when it is compiled with `/define:TESTHOOKS`. These point the app at a local fake Roblox server for automated testing. `build.cmd` never sets that flag, so the real exe doesn't contain them.
+
+## Contributors
+
+- [g1tummis](https://github.com/g1tummis): creator and maintainer
+- Claude (Anthropic), via Claude Code: co-author
