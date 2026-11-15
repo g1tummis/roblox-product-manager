@@ -119,7 +119,7 @@ function startLogin(req, res, url, s) {
     code_challenge_method: 'S256',
   });
   // "Add or remove games" re-opens Roblox's consent screen so the user can change which experiences are shared.
-  if (url.searchParams.get('prompt') === 'consent') q.set('prompt', 'consent');
+  if (url.searchParams.get('prompt') === 'consent') q.set('prompt', 'select_account consent'); // Roblox requires account selection alongside consent
   redirect(res, `${OAUTH}/authorize?${q.toString().replace(/\+/g, '%20')}`);
 }
 

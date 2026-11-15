@@ -5,25 +5,22 @@ using System.Windows.Forms;
 
 namespace RobloxProductManager
 {
-    // First-run setup and "App settings": Client ID, Client Secret, port, scopes.
+    // "Advanced settings": Client ID (built in by default), optional Client Secret, port, scopes.
     class SetupForm : Form
     {
         readonly Settings s;
-        readonly bool hadSecret;
         readonly TextBox idBox, secretBox, redirectBox, scopesBox;
         readonly NumericUpDown portBox;
 
         public SetupForm(Settings settings, bool firstRun)
         {
             s = settings;
-            hadSecret = s.ClientSecret != "";
-            Settings old = s.Complete ? null : Settings.FromOldVersion();
 
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = SystemFonts.MessageBoxFont;
-            Text = firstRun ? "Set up Roblox Product Manager" : "App settings";
+            Text = firstRun ? "Set up Roblox Product Manager" : "Advanced settings";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
@@ -40,9 +37,9 @@ namespace RobloxProductManager
                 AutoSize = true,
                 MaximumSize = new Size(600, 0),
                 Margin = new Padding(0, 0, 0, 8),
-                Text = "This app signs in through your own Roblox OAuth 2.0 app. On the Creator Dashboard (it needs an ID-verified account): " +
-                       "create an app, tick the scopes listed below, add the Redirect URL below, then paste the app's Client ID and Secret here. " +
-                       "README.md (Part 1) has the full steps.",
+                Text = "Most people never need to change anything here: the app comes with its own Roblox OAuth app built in, " +
+                       "and no Client Secret is needed. Change these only if you run your own OAuth app (README.md, Part 1). " +
+                       "That app needs the Redirect URL and scopes listed below.",
             };
             t.Controls.Add(intro, 0, 0);
             t.SetColumnSpan(intro, 3);
@@ -52,14 +49,15 @@ namespace RobloxProductManager
             t.Controls.Add(link, 0, 1);
             t.SetColumnSpan(link, 3);
 
-            idBox = new TextBox { Width = 380, Text = s.ClientId != "" ? s.ClientId : (old != null ? old.ClientId : "") };
-            AddRow(t, 2, "Client ID:", idBox, null);
+            idBox = new TextBox { Width = 380, Text = s.ClientId };
+            var builtIn = new Button { Text = "Use built-in", AutoSize = true };
+            builtIn.Click += (o, e) => { idBox.Text = Settings.BuiltInClientId; secretBox.Text = ""; };
+            AddRow(t, 2, "Client ID:", idBox, builtIn);
 
-            secretBox = new TextBox { Width = 380, UseSystemPasswordChar = true };
-            if (!hadSecret && old != null) secretBox.Text = old.ClientSecret;
-            AddRow(t, 3, "Client Secret:", secretBox, hadSecret ? Hint("Leave empty to keep the saved one") : null);
+            secretBox = new TextBox { Width = 380, UseSystemPasswordChar = true, Text = s.ClientSecret };
+            AddRow(t, 3, "Client Secret:", secretBox, Hint("Optional. Leave empty unless your own app needs it"));
 
-            portBox = new NumericUpDown { Minimum = 1, Maximum = 65535, Width = 90, Value = old != null ? old.Port : s.Port };
+            portBox = new NumericUpDown { Minimum = 1, Maximum = 65535, Width = 90, Value = s.Port };
             AddRow(t, 4, "Port:", portBox, Hint("Keep 3000 unless something else uses it"));
 
             redirectBox = new TextBox { Width = 380, ReadOnly = true };
@@ -83,7 +81,7 @@ namespace RobloxProductManager
                 MaximumSize = new Size(600, 0),
                 ForeColor = SystemColors.GrayText,
                 Margin = new Padding(0, 8, 0, 0),
-                Text = "Tick exactly these scopes on your Roblox app. Your Client Secret and sign-in are stored encrypted, readable only by your Windows account.",
+                Text = "Your sign-in (and a Client Secret, if you enter one) is stored encrypted, readable only by your Windows account.",
             };
             t.Controls.Add(note, 0, 7);
             t.SetColumnSpan(note, 3);
@@ -136,16 +134,16 @@ namespace RobloxProductManager
         {
             string id = idBox.Text.Trim(), secret = secretBox.Text.Trim();
             var scopes = Split(scopesBox.Text);
-            if (id == "" || id.Any(char.IsWhiteSpace)) { Warn("Paste the Client ID from your Roblox OAuth app (no spaces)."); idBox.Focus(); return; }
-            if (secret == "" && !hadSecret) { Warn("Paste the Client Secret from your Roblox OAuth app."); secretBox.Focus(); return; }
-            if (secret.Any(char.IsWhiteSpace)) { Warn("The Client Secret has no spaces. Paste it again."); secretBox.Focus(); return; }
+            if (id == "") id = Settings.BuiltInClientId;
+            if (id.Any(char.IsWhiteSpace)) { Warn("The Client ID has no spaces. Paste it again, or click Use built-in."); idBox.Focus(); return; }
+            if (secret.Any(char.IsWhiteSpace)) { Warn("The Client Secret has no spaces. Paste it again, or leave it empty."); secretBox.Focus(); return; }
             if (!scopes.Contains("openid")) { Warn("The scopes must include openid."); scopesBox.Focus(); return; }
             if (secret != "" && !secret.StartsWith("RBX-") &&
                 MessageBox.Show(this, "Roblox client secrets usually start with \"RBX-\". Save this one anyway?", Text,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
 
             s.ClientId = id;
-            if (secret != "") s.ClientSecret = secret;
+            s.ClientSecret = secret;
             s.Port = (int)portBox.Value;
             s.Scopes = string.Join(" ", scopes);
             try { s.Save(); }

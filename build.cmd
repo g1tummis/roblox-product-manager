@@ -13,7 +13,7 @@ if not exist "%~dp0dist" mkdir "%~dp0dist"
   /out:"%~dp0dist\RobloxProductManager.exe" ^
   /win32manifest:"%~dp0app\app.manifest" ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
-  /r:System.Net.Http.dll /r:System.Web.Extensions.dll /r:System.Security.dll ^
+  /r:System.Net.Http.dll /r:System.Web.Extensions.dll /r:System.Security.dll /r:Microsoft.VisualBasic.dll ^
   "%~dp0app\*.cs"
 if errorlevel 1 (
   echo Build failed.

@@ -18,6 +18,7 @@ namespace RobloxProductManager
         Label signedOutMsg, waitingLabel, whoLabel, noGamesLabel;
         LinkLabel settingsLink;
         ComboBox gameBox;
+        PictureBox headshot;
         TableLayoutPanel topBar;
         TabControl tabs;
         ToolStripStatusLabel statusLabel;
@@ -105,7 +106,7 @@ namespace RobloxProductManager
                 "",
                 "You stay signed in next time you open the app. Sign out removes this app's access on Roblox.",
             }));
-            settingsLink = new LinkLabel { Text = "App settings (Client ID, Client Secret, port)", AutoSize = true, Margin = new Padding(0, 16, 0, 0) };
+            settingsLink = new LinkLabel { Text = "Advanced settings (only needed if you run your own Roblox OAuth app)", AutoSize = true, Margin = new Padding(0, 16, 0, 0) };
             settingsLink.LinkClicked += (s, e) => OpenSettings();
 
             flow.Controls.AddRange(new Control[] { title, intro, signedOutMsg, signInBtn, waitingLabel, howTitle, steps, settingsLink });
@@ -132,6 +133,8 @@ namespace RobloxProductManager
             left.Controls.Add(MakeButton("Refresh list", async (s, e) => await ReloadGames()));
             left.Controls.Add(MakeButton("Add or remove games", async (s, e) => await SignIn(true)));
             var right = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Top | AnchorStyles.Right, Margin = new Padding(0) };
+            headshot = new PictureBox { Size = new Size(32, 32), SizeMode = PictureBoxSizeMode.Zoom, Margin = new Padding(0, 0, 6, 0) };
+            right.Controls.Add(headshot);
             whoLabel = new Label { AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
             right.Controls.Add(whoLabel);
             right.Controls.Add(MakeButton("Settings", (s, e) => OpenSettings()));
@@ -215,6 +218,25 @@ namespace RobloxProductManager
             signedOutPanel.Visible = false;
             mainPanel.Visible = true;
             whoLabel.Text = api.User != null ? "Signed in as " + api.User.Display : "";
+            var load = LoadHeadshot();
+        }
+
+        string headshotFor;
+
+        async Task LoadHeadshot()
+        {
+            if (api.User == null || api.User.Id == "" || headshotFor == api.User.Id) return;
+            string userId = api.User.Id;
+            headshotFor = userId;
+            headshot.Image = null;
+            try
+            {
+                string url = await api.HeadshotUrl(userId);
+                if (url == "") return;
+                var img = await api.DownloadImage(url, 32);
+                if (img != null && api.User != null && api.User.Id == userId) headshot.Image = img;
+            }
+            catch (ApiException) { headshotFor = null; /* the picture is optional */ }
         }
 
         void SetSigningIn(bool on, string text)
@@ -264,7 +286,8 @@ namespace RobloxProductManager
             if (chooseGames && HasUnsaved() && !Ask("You have unsaved edits. Continue and throw them away?")) return;
             bool fromMain = mainPanel.Visible;
             signInCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
-            SetSigningIn(true, "Waiting for you to approve on Roblox in your web browser. Come back here when you're done.");
+            SetSigningIn(true, "Waiting for you to approve on Roblox in your web browser. Come back here when you're done.\n" +
+                "If Roblox says \"Redirect URI is invalid\", the app's owner must add " + settings.RedirectUri + " to the Roblox OAuth app.");
             try
             {
                 await api.SignIn(chooseGames, signInCts.Token);
@@ -375,7 +398,7 @@ namespace RobloxProductManager
             {
                 api.Forget();
                 ClearGames();
-                ShowSignedOut("App settings changed. Sign in again.");
+                ShowSignedOut("Settings changed. Sign in again.");
             }
             else SetStatus("Settings saved.");
         }

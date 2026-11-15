@@ -13,6 +13,9 @@ namespace RobloxProductManager
     class KindPanel : UserControl
     {
         static readonly Color ChangedColor = Color.FromArgb(255, 243, 176);
+        const int IconSize = 40;
+        // Downloaded icons, shrunk to IconSize, kept for this session. Key: kind + id (product icons: asset id).
+        static readonly Dictionary<string, Image> IconCache = new Dictionary<string, Image>();
         const string ImageFilter = "Images (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp";
         const string Done = "done";
 
@@ -58,7 +61,7 @@ namespace RobloxProductManager
             newGrid.Columns.Add(TextCol("image", "Image file", 22, false));
             newGrid.Columns.Add(ButtonCol());
             newGrid.Columns.Add(TextCol("status", "Status", 24, true));
-            newGrid.DefaultValuesNeeded += (s, e) => { e.Row.Cells[priced ? "forSale" : "active"].Value = true; };
+            newGrid.DefaultValuesNeeded += (s, e) => { if (priced) { e.Row.Cells["price"].Value = "1"; e.Row.Cells["forSale"].Value = true; } else e.Row.Cells["active"].Value = false; }; // new badges start inactive
             newGrid.CellContentClick += (s, e) => { if (e.RowIndex >= 0 && newGrid.Columns[e.ColumnIndex].Name == "browse") BrowseImage(newGrid, e.RowIndex); };
             newGrid.CurrentCellDirtyStateChanged += (s, e) => { if (newGrid.CurrentCell is DataGridViewCheckBoxCell) newGrid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
             newGrid.KeyDown += (s, e) => GridKeyDown(newGrid, e, true);
@@ -71,6 +74,7 @@ namespace RobloxProductManager
 
             createBar = Bar();
             createBtn = AddButton(createBar, "Create all", async (s, e) => await CreateAll());
+            if (kind == Kind.Badge) AddButton(createBar, "Create free badges", async (s, e) => await CreateAll(true));
             AddButton(createBar, "Paste rows", (s, e) => PasteRows());
             AddButton(createBar, "Remove created rows", (s, e) => RemoveDone());
             createBar.Controls.Add(BarLabel("Image for rows without one:"));
@@ -109,6 +113,12 @@ namespace RobloxProductManager
             oldGrid = MakeGrid();
             oldGrid.AllowUserToAddRows = false;
             oldGrid.AllowUserToDeleteRows = false;
+            oldGrid.RowTemplate.Height = IconSize + 6;
+            oldGrid.Columns.Add(new DataGridViewImageColumn
+            {
+                Name = "icon", HeaderText = "Icon", Width = IconSize + 12, AutoSizeMode = DataGridViewAutoSizeColumnMode.None,
+                ImageLayout = DataGridViewImageCellLayout.Zoom, ReadOnly = true, DefaultCellStyle = { NullValue = null },
+            });
             oldGrid.Columns.Add(TextCol("id", "ID", 12, true));
             oldGrid.Columns.Add(TextCol("name", "Name", 26, false));
             if (priced) oldGrid.Columns.Add(TextCol("price", "Price (Robux)", 10, false));
@@ -124,7 +134,7 @@ namespace RobloxProductManager
             oldGrid.Columns.Add(TextCol("status", "Status", 22, true));
             oldGrid.CellValueChanged += (s, e) =>
             {
-                if (!suppress && e.RowIndex >= 0 && oldGrid.Columns[e.ColumnIndex].Name != "status") MarkChanged(oldGrid.Rows[e.RowIndex]);
+                if (!suppress && e.RowIndex >= 0 && oldGrid.Columns[e.ColumnIndex].Name != "status" && oldGrid.Columns[e.ColumnIndex].Name != "icon") MarkChanged(oldGrid.Rows[e.RowIndex]);
             };
             oldGrid.CurrentCellDirtyStateChanged += (s, e) => { if (oldGrid.CurrentCell is DataGridViewCheckBoxCell) oldGrid.CommitEdit(DataGridViewDataErrorContexts.Commit); };
             oldGrid.CellContentClick += (s, e) =>
@@ -145,6 +155,8 @@ namespace RobloxProductManager
             AddButton(editBar, "Reload", async (s, e) => { if (!HasUnsaved || main.Ask("Throw away unsaved edits and reload?")) await LoadList(); });
             if (kind != Kind.Product)
                 AddButton(editBar, "Open on Roblox", (s, e) => { if (oldGrid.CurrentRow != null) OpenOnRoblox(oldGrid.CurrentRow); });
+            if (kind == Kind.Badge)
+                AddButton(editBar, "Add badge by ID", async (s, e) => await AddBadgeById());
             editBar.Controls.Add(BarLabel("Filter:"));
             filterBox = new TextBox { Width = 180 };
             filterBox.TextChanged += (s, e) => ApplyFilter();
@@ -239,7 +251,7 @@ namespace RobloxProductManager
             return x == ".png" || x == ".jpg" || x == ".jpeg" || x == ".bmp";
         }
 
-        bool IsBlank(DataGridViewRow r) { return S(r, "name") == "" && S(r, "description") == "" && S(r, "image") == "" && S(r, "price") == ""; }
+        bool IsBlank(DataGridViewRow r) { return S(r, "name") == "" && S(r, "description") == "" && S(r, "image") == ""; } // the default price alone does not count
 
         IEnumerable<DataGridViewRow> PendingRows()
         {
@@ -273,10 +285,10 @@ namespace RobloxProductManager
                 string digits = new string((price ?? "").Where(char.IsDigit).ToArray());
                 long v;
                 bool has = digits.Length > 0 && digits.Length < 13 && TryWhole(digits, out v) && v > 0;
-                r.Cells["price"].Value = has ? digits.TrimStart('0') : "";
-                r.Cells["forSale"].Value = has || forSaleWithoutPrice;
+                r.Cells["price"].Value = has ? digits.TrimStart('0') : "1"; // 1 Robux is the lowest allowed price
+                r.Cells["forSale"].Value = true;
             }
-            else r.Cells["active"].Value = true;
+            else r.Cells["active"].Value = false; // new badges start inactive; tick Active to publish them right away
             return r;
         }
 
@@ -430,7 +442,8 @@ namespace RobloxProductManager
         }
 
         // ---------- create ----------
-        async Task CreateAll()
+        // freeOnly (badges): create only as many as today's free quota allows and never spend Robux.
+        async Task CreateAll(bool freeOnly = false)
         {
             var u = main.Game;
             if (u == null || main.Busy) return;
@@ -438,13 +451,48 @@ namespace RobloxProductManager
             string shared = sharedImage.Text.Trim();
             if (shared != "" && !File.Exists(shared)) { main.SetStatus("The image for rows without one was not found: " + shared, true); return; }
             var rows = PendingRows().ToList();
+            int free = int.MaxValue;
+
+            if (freeOnly)
+            {
+                main.SetStatus("Checking free badges...");
+                try { free = await main.Api.FreeBadgeQuota(u.Id); }
+                catch (ApiException ex) { main.HandleApiError(ex, "Could not check free badges, so nothing was created: "); return; }
+                if (free == 0) { main.SetStatus("No free badges left today for this game. The free count resets at 00:00 UTC.", true); return; }
+                if (rows.Count < free)
+                {
+                    int extra = free - rows.Count;
+                    string q = rows.Count == 0
+                        ? "This game can create " + free + " free badge(s) today.\n\nAdd " + extra + " row(s) named \"Badge 1\", \"Badge 2\"... and create them? You can rename them afterwards."
+                        : "This game can create " + free + " free badge(s) today, but only " + rows.Count + " row(s) are ready.\n\nYes: add " + extra +
+                          " more row(s) named \"Badge 1\", \"Badge 2\"... so all free badges are used.\nNo: create just your " + rows.Count + " row(s).";
+                    var answer = MessageBox.Show(this, q, "Create free badges", rows.Count == 0 ? MessageBoxButtons.OKCancel : MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                    if (answer == DialogResult.Cancel) { main.SetStatus("Cancelled. Nothing was created."); return; }
+                    if (answer == DialogResult.OK || answer == DialogResult.Yes)
+                    {
+                        var used = new HashSet<string>(newGrid.Rows.Cast<DataGridViewRow>().Where(r => !r.IsNewRow).Select(r => S(r, "name")), StringComparer.OrdinalIgnoreCase);
+                        int n = 1;
+                        for (int i = 0; i < extra; i++)
+                        {
+                            while (used.Contains("Badge " + n)) n++;
+                            used.Add("Badge " + n);
+                            rows.Add(AddNewRow("Badge " + n, "", "", "", false));
+                        }
+                    }
+                }
+                if (rows.Count > free)
+                {
+                    foreach (var r in rows.Skip(free)) SetRowStatus(r, "Waiting: no free badges left today", 0);
+                    rows = rows.Take(free).ToList();
+                }
+            }
+
             if (rows.Count == 0) { main.SetStatus("Add at least one row first.", true); return; }
             int bad = 0;
             foreach (var r in rows) { string v = ValidateRow(r, shared); SetRowStatus(r, v, v != "" ? 2 : 0); if (v != "") bad++; }
             if (bad > 0) { main.SetStatus("Fix the " + bad + " row(s) marked in red.", true); return; }
 
-            int free = int.MaxValue;
-            if (kind == Kind.Badge)
+            if (kind == Kind.Badge && !freeOnly)
             {
                 main.SetStatus("Checking free badges...");
                 try { free = await main.Api.FreeBadgeQuota(u.Id); }
@@ -484,7 +532,7 @@ namespace RobloxProductManager
                     if (priced && TryWhole(S(r, "price"), out price)) n.Price = price;
                     try
                     {
-                        string id = await main.Api.CreateItem(kind, u, n, free > 0 ? 0 : 100);
+                        string id = await main.Api.CreateItem(kind, u, n, freeOnly || free > 0 ? 0 : 100);
                         r.Tag = Done;
                         r.ReadOnly = true;
                         r.DefaultCellStyle.ForeColor = SystemColors.GrayText;
@@ -576,7 +624,9 @@ namespace RobloxProductManager
                     SetRowStatus(r, "Saving...", 0);
                     try
                     {
+                        bool newImage = priced && S(r, "image") != "";
                         await main.Api.UpdateItem(kind, u.Id, it.Id, Diff(r));
+                        if (newImage) IconRefreshed.Remove(IconKey(it)); // fetch the new icon on the next load and overwrite the cached file
                         // Remember what was saved, so the row is no longer "changed".
                         suppress = true;
                         it.Name = S(r, "name");
@@ -638,6 +688,7 @@ namespace RobloxProductManager
                 if (seq != loadSeq) return;
                 Render(items);
                 countLabel.Text = items.Count + " found.";
+                var icons = LoadIcons(items, seq);
             }
             catch (ApiException ex)
             {
@@ -646,6 +697,76 @@ namespace RobloxProductManager
                 countLabel.ForeColor = Color.Firebrick;
                 countLabel.Text = "Could not load.";
                 main.HandleApiError(ex, "Could not load " + Lower + ": ");
+            }
+        }
+
+        string IconKey(Item it) { return kind + ":" + it.Id; }
+
+        // Icons downloaded fresh from Roblox in this session (the rest came from the disk cache and get refreshed once).
+        static readonly HashSet<string> IconRefreshed = new HashSet<string>();
+
+        // On-disk cache file, named after the item's own ID (game pass ID, developer product ID or badge ID).
+        string IconFile(Item it)
+        {
+            string sub = kind == Kind.Pass ? "passes" : kind == Kind.Product ? "products" : "badges";
+            return Path.Combine(Settings.IconFolder, sub, it.Id + ".png");
+        }
+
+        static Image ReadImage(string path)
+        {
+            try
+            {
+                using (var ms = new MemoryStream(File.ReadAllBytes(path))) // read fully so the file isn't kept locked
+                using (var img = Image.FromStream(ms))
+                    return new Bitmap(img);
+            }
+            catch (Exception) { return null; }
+        }
+
+        // Fills the Icon column: memory and disk cache first (instant), then a fresh copy from Roblox once per session,
+        // which overwrites the cached file with the same name.
+        async Task LoadIcons(List<Item> items, int seq)
+        {
+            foreach (var it in items)
+            {
+                if (IconCache.ContainsKey(IconKey(it))) continue;
+                var cached = File.Exists(IconFile(it)) ? ReadImage(IconFile(it)) : null;
+                if (cached != null) IconCache[IconKey(it)] = cached;
+            }
+            ShowIcons(seq);
+
+            var stale = items.Where(it => !IconRefreshed.Contains(IconKey(it)) && (kind != Kind.Product || it.IconAssetId != "" && it.IconAssetId != "0")).ToList();
+            if (stale.Count == 0) return;
+            Dictionary<string, string> urls;
+            try { urls = await main.Api.IconUrls(kind, stale.Select(it => kind == Kind.Product ? it.IconAssetId : it.Id).Distinct().ToList()); }
+            catch (ApiException) { return; } // icons are optional; cached ones stay
+            foreach (var it in stale)
+            {
+                if (seq != loadSeq) return;
+                string url;
+                if (!urls.TryGetValue(kind == Kind.Product ? it.IconAssetId : it.Id, out url)) continue;
+                var img = await main.Api.DownloadImage(url, IconSize);
+                if (img == null) continue;
+                IconCache[IconKey(it)] = img;
+                IconRefreshed.Add(IconKey(it));
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(IconFile(it)));
+                    img.Save(IconFile(it), System.Drawing.Imaging.ImageFormat.Png); // overwrites any icon with the same name
+                }
+                catch (Exception) { /* cache is optional */ }
+                ShowIcons(seq);
+            }
+        }
+
+        void ShowIcons(int seq)
+        {
+            if (seq != loadSeq) return;
+            foreach (DataGridViewRow r in oldGrid.Rows)
+            {
+                var it = r.Tag as Item;
+                Image img;
+                if (it != null && IconCache.TryGetValue(IconKey(it), out img) && !ReferenceEquals(r.Cells["icon"].Value, img)) r.Cells["icon"].Value = img;
             }
         }
 
@@ -688,6 +809,28 @@ namespace RobloxProductManager
                 var it = r.Tag as Item;
                 r.Visible = q == "" || it == null || it.Name.ToLowerInvariant().Contains(q) || it.Id.Contains(q);
             }
+        }
+
+        // Disabled badges don't appear in Roblox's public list. Add one by ID (from the Creator Dashboard) so it can be edited here.
+        async Task AddBadgeById()
+        {
+            var u = main.Game;
+            if (u == null || main.Busy) return;
+            string input = Microsoft.VisualBasic.Interaction.InputBox(
+                "Disabled badges don't show up in Roblox's public badge list. Enter the badge ID (from the Creator Dashboard or the badge's web address). " +
+                "You can enter several, separated by commas or spaces.", "Add badge by ID", "").Trim();
+            if (input == "") return;
+            var ids = input.Split(new[] { ',', ' ', ';', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => new string(x.Where(char.IsDigit).ToArray())).Where(x => x != "").Distinct().ToList();
+            int added = 0;
+            var problems = new List<string>();
+            foreach (var id in ids)
+            {
+                try { await main.Api.GetBadge(u.Id, id); main.Api.RememberBadge(u.Id, id); added++; }
+                catch (ApiException ex) { problems.Add(id + ": " + (ex.Status == 404 ? "not found" : ex.Message)); }
+            }
+            if (added > 0) await LoadList();
+            main.SetStatus((added > 0 ? "Added " + added + " badge(s). " : "") + (problems.Count > 0 ? "Not added: " + string.Join("; ", problems) : ""), problems.Count > 0);
         }
 
         async Task LoadQuota(Universe u)

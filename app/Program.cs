@@ -8,8 +8,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Roblox Product Manager")]
 [assembly: AssemblyProduct("Roblox Product Manager")]
 [assembly: AssemblyDescription("Create and edit Roblox game passes, developer products and badges.")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyFileVersion("2.1.0.0")]
 [assembly: TargetFramework(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
 
 namespace RobloxProductManager
@@ -30,7 +30,12 @@ namespace RobloxProductManager
                 MessageBox.Show("Something went wrong:\n\n" + e.Exception.Message, "Roblox Product Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
 
             bool firstInstance;
-            using (var mutex = new Mutex(true, "RobloxProductManager.SingleInstance", out firstInstance))
+#if TESTHOOKS
+            const string instanceName = "RobloxProductManager.SingleInstance.Test";
+#else
+            const string instanceName = "RobloxProductManager.SingleInstance";
+#endif
+            using (var mutex = new Mutex(true, instanceName, out firstInstance))
             {
                 if (!firstInstance)
                 {

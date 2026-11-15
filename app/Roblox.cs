@@ -26,7 +26,7 @@ namespace RobloxProductManager
         public bool IsGroup { get { return OwnerType == "Group"; } }
         public override string ToString()
         {
-            return Name + "   (" + (IsGroup ? "Group" + (OwnerName != "" ? ": " + OwnerName : "") : "Yours") + ", ID " + Id + ")";
+            return Name + " (" + (IsGroup ? "Group" + (OwnerName != "" ? ": " + OwnerName : "") : "Yours") + ", ID " + Id + ")";
         }
     }
 
@@ -48,6 +48,7 @@ namespace RobloxProductManager
         public string Id = "", Name = "", Description = "";
         public long? Price;
         public bool ForSale, Regional, Enabled, Locked;
+        public string IconAssetId = ""; // developer products: the icon image asset (used to fetch its thumbnail)
     }
 
     class NewItem
@@ -193,7 +194,7 @@ namespace RobloxProductManager
             catch (SocketException)
             {
                 throw new ApiException(0, "Port " + port + " is already used by another program, so sign-in can't finish. " +
-                    "Close that program (for example an older copy of this app), or choose another port in App settings and add the new Redirect URL on Roblox.");
+                    "Close that program (for example an older copy of this app), or choose another port in Advanced settings (the Redirect URL on Roblox must match it).");
             }
             listeners.Add(v4);
             try { var v6 = new TcpListener(IPAddress.IPv6Loopback, port); v6.Start(); listeners.Add(v6); }
@@ -311,12 +312,13 @@ namespace RobloxProductManager
 #if TESTHOOKS
         // Test builds only (build with /define:TESTHOOKS): talk to a local fake Roblox server instead.
         static readonly string TestRoot = Environment.GetEnvironmentVariable("RPM_TEST_ROOT");
-        static readonly string OAuth = TestRoot + "/oauth/v1", Apis = TestRoot, BadgesApi = TestRoot + "/badges", GamesApi = TestRoot + "/games";
+        static readonly string OAuth = TestRoot + "/oauth/v1", Apis = TestRoot, BadgesApi = TestRoot + "/badges", GamesApi = TestRoot + "/games", ThumbsApi = TestRoot + "/thumbs";
 #else
         const string OAuth = "https://apis.roblox.com/oauth/v1";
         const string Apis = "https://apis.roblox.com";
         const string BadgesApi = "https://badges.roblox.com";
         const string GamesApi = "https://games.roblox.com";
+        const string ThumbsApi = "https://thumbnails.roblox.com";
 #endif
         readonly Settings settings;
         readonly HttpClient http;
@@ -341,7 +343,7 @@ namespace RobloxProductManager
                 "&scope=" + E(settings.Scopes) +
                 "&response_type=code&state=" + state + "&nonce=" + nonce +
                 "&code_challenge=" + Sha256Url(verifier) + "&code_challenge_method=S256" +
-                (chooseGames ? "&prompt=consent" : "");
+                (chooseGames ? "&prompt=" + E("select_account consent") : ""); // Roblox requires account selection alongside consent
 
             NameValueCollection q;
             using (var listener = new LoopbackListener(settings.Port))
@@ -443,10 +445,13 @@ namespace RobloxProductManager
         static ApiException Offline() { return new ApiException(0, "Could not reach Roblox. Check your internet connection and try again."); }
         static ApiException TooSlow() { return new ApiException(0, "Roblox took too long to respond. Try again."); }
 
+        // A Client Secret is sent only if one is set. Without one the app is a public client:
+        // the PKCE code_verifier proves the sign-in, as Roblox's OAuth docs describe for apps that can't keep secrets.
         async Task<object> OAuthPost(string path, Dictionary<string, string> form)
         {
             form["client_id"] = settings.ClientId;
-            form["client_secret"] = settings.ClientSecret;
+            bool withSecret = settings.ClientSecret != "";
+            if (withSecret) form["client_secret"] = settings.ClientSecret;
             HttpResponseMessage resp;
             try { resp = await http.PostAsync(OAuth + path, new FormUrlEncodedContent(form)); }
             catch (HttpRequestException) { throw Offline(); }
@@ -455,7 +460,17 @@ namespace RobloxProductManager
             {
                 int status = (int)resp.StatusCode;
                 string text = await resp.Content.ReadAsStringAsync();
-                if (!resp.IsSuccessStatusCode) throw new ApiException(status, "Roblox sign-in error (" + status + "): " + J.Describe(text, status));
+                if (!resp.IsSuccessStatusCode)
+                {
+                    object err = null;
+                    try { err = J.Parse(text); } catch (Exception) { }
+                    string code = J.Str(err, "error");
+                    if (code == "invalid_client" || code == "unauthorized_client")
+                        throw new ApiException(status, withSecret
+                            ? "Roblox rejected the Client Secret saved in Settings. Fix it there, or clear it to sign in without one."
+                            : "Roblox requires a Client Secret for this OAuth app, so signing in without one isn't possible. The app's owner can enter it in Settings.");
+                    throw new ApiException(status, "Roblox sign-in error (" + status + "): " + J.Describe(text, status));
+                }
                 return J.Parse(text) ?? new Dictionary<string, object>();
             }
         }
@@ -542,8 +557,8 @@ namespace RobloxProductManager
             {
                 if (kind == Kind.Badge)
                 {
-                    var d = await Send(HttpMethod.Get, BadgesApi + "/v1/universes/" + universe + "/badges?limit=100&sortOrder=Asc" +
-                        (token != "" ? "&cursor=" + E(token) : ""), null, false);
+                    var d = await BadgePage(BadgesApi + "/v1/universes/" + universe + "/badges?limit=100&sortOrder=Asc" +
+                        (token != "" ? "&cursor=" + E(token) : ""));
                     foreach (var b in J.A(d, "data"))
                         list.Add(new Item { Id = J.Str(b, "id"), Name = J.Str(b, "name"), Description = J.Str(b, "description"), Enabled = J.B(b, "enabled") });
                     token = J.Str(d, "nextPageCursor");
@@ -568,13 +583,56 @@ namespace RobloxProductManager
                             ForSale = J.B(x, "isForSale"),
                             Regional = J.A(pi, "enabledFeatures").Any(f => Convert.ToString(f) == "RegionalPricing"),
                             Locked = J.B(x, "isImmutable"),
+                            IconAssetId = J.Str(x, "iconImageAssetId"),
                         });
                     }
                     token = J.Str(d, "nextPageToken");
                 }
                 if (token == "") break;
             }
+            if (kind == Kind.Badge) await AddHiddenBadges(universe, list);
             return list;
+        }
+
+        // Public badge list. (Tested: Roblox ignores an OAuth token here, so disabled badges never appear in it.)
+        Task<object> BadgePage(string url) { return Send(HttpMethod.Get, url, null, false); }
+
+        // Roblox's public badge list leaves out disabled badges. Look up remembered IDs that are missing.
+        async Task AddHiddenBadges(string universe, List<Item> list)
+        {
+            var known = settings.KnownBadges(universe);
+            var listed = new HashSet<string>(list.Select(i => i.Id));
+            foreach (var id in known.Where(id => !listed.Contains(id)).ToList())
+            {
+                try { list.Add(await GetBadge(universe, id)); }
+                catch (ApiException ex) { if (ex.Status == 404 || ex.Status == 400) known.Remove(id); } // deleted or not in this game
+            }
+            foreach (var i in list) known.Add(i.Id);
+            list.Sort((a, b) => CompareIds(a.Id, b.Id));
+            TrySave();
+        }
+
+        static int CompareIds(string a, string b)
+        {
+            long x, y;
+            if (long.TryParse(a, out x) && long.TryParse(b, out y)) return x.CompareTo(y);
+            return string.CompareOrdinal(a, b);
+        }
+
+        // Single badge lookup (works for disabled badges too). Fails with 400 if the badge belongs to another game.
+        public async Task<Item> GetBadge(string universe, string id)
+        {
+            var b = await Send(HttpMethod.Get, BadgesApi + "/v1/badges/" + E(id), null, false);
+            string owner = J.Str(J.G(b, "awardingUniverse"), "id");
+            if (owner != "" && owner != universe) throw new ApiException(400, "Badge " + id + " belongs to a different game.");
+            return new Item { Id = J.Str(b, "id"), Name = J.Str(b, "name"), Description = J.Str(b, "description"), Enabled = J.B(b, "enabled") };
+        }
+
+        public void RememberBadge(string universe, string id)
+        {
+            if (id == "") return;
+            settings.KnownBadges(universe).Add(id);
+            TrySave();
         }
 
         public async Task<string> CreateItem(Kind kind, Universe u, NewItem n, int expectedBadgeCost)
@@ -603,7 +661,9 @@ namespace RobloxProductManager
                 if (image != null) f.AddFile(kind == Kind.Badge ? "files" : "imageFile", n.ImagePath, image);
                 return f.Content;
             }, true);
-            return J.Str(r, kind == Kind.Pass ? "gamePassId" : kind == Kind.Product ? "productId" : "id");
+            string newId = J.Str(r, kind == Kind.Pass ? "gamePassId" : kind == Kind.Product ? "productId" : "id");
+            if (kind == Kind.Badge) RememberBadge(u.Id, newId);
+            return newId;
         }
 
         public async Task UpdateItem(Kind kind, string universe, string id, ItemChanges ch)
@@ -645,6 +705,52 @@ namespace RobloxProductManager
             if (r == null || !int.TryParse(Convert.ToString(r, CultureInfo.InvariantCulture), out n) || n < 0)
                 throw new ApiException(0, "Could not read the free badge count from Roblox.");
             return n;
+        }
+
+        // ---------- thumbnails (public, no sign-in needed) ----------
+        // ids: game pass IDs, badge IDs, or (developer products) icon image asset IDs. Returns id -> image URL.
+        public async Task<Dictionary<string, string>> IconUrls(Kind kind, IList<string> ids)
+        {
+            var urls = new Dictionary<string, string>();
+            for (int i = 0; i < ids.Count; i += 100)
+            {
+                string list = string.Join(",", ids.Skip(i).Take(100));
+                string url = kind == Kind.Pass ? ThumbsApi + "/v1/game-passes?gamePassIds=" + list
+                    : kind == Kind.Badge ? ThumbsApi + "/v1/badges/icons?badgeIds=" + list
+                    : ThumbsApi + "/v1/assets?assetIds=" + list;
+                var d = await Send(HttpMethod.Get, url + "&size=150x150&format=Png", null, false);
+                foreach (var t in J.A(d, "data"))
+                    if (J.Str(t, "state") == "Completed" && J.Str(t, "imageUrl") != "") urls[J.Str(t, "targetId")] = J.Str(t, "imageUrl");
+            }
+            return urls;
+        }
+
+        public async Task<string> HeadshotUrl(string userId)
+        {
+            var d = await Send(HttpMethod.Get, ThumbsApi + "/v1/users/avatar-headshot?userIds=" + E(userId) + "&size=48x48&format=Png&isCircular=true", null, false);
+            var first = J.A(d, "data").FirstOrDefault();
+            return J.Str(first, "state") == "Completed" ? J.Str(first, "imageUrl") : "";
+        }
+
+        // Downloads an image and shrinks it to size x size pixels so it uses little memory. Returns null on failure.
+        public async Task<System.Drawing.Image> DownloadImage(string url, int size)
+        {
+            try
+            {
+                byte[] bytes = await http.GetByteArrayAsync(url);
+                using (var ms = new MemoryStream(bytes))
+                using (var src = System.Drawing.Image.FromStream(ms))
+                {
+                    var bmp = new System.Drawing.Bitmap(size, size);
+                    using (var g = System.Drawing.Graphics.FromImage(bmp))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(src, 0, 0, size, size);
+                    }
+                    return bmp;
+                }
+            }
+            catch (Exception) { return null; }
         }
 
         // ---------- helpers ----------
