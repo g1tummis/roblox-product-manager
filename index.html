@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roblox Product Manager</title>
+<style>
+body{font:14px/1.45 system-ui,sans-serif;max-width:1150px;margin:0 auto;padding:10px 14px;color:#111;background:#fff}
+h1{font-size:20px;margin:6px 0}
+h2{font-size:16px;margin:20px 0 6px}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #bbb;padding:3px 5px;text-align:left;vertical-align:middle}
+th{background:#eee;font-weight:600}
+td input[type=text],td input[type=number]{width:100%;box-sizing:border-box}
+textarea{width:100%;box-sizing:border-box;font:inherit}
+fieldset{border:0;padding:0;margin:0;min-width:0}
+button{padding:4px 10px;font:inherit}
+.hide{display:none!important}
+.err{color:#b00000}
+.ok{color:#006400}
+.muted{color:#555}
+tr.changed{background:#fff3b0}
+tr.done{opacity:.6}
+nav{margin:12px 0;display:flex;gap:6px;flex-wrap:wrap}
+nav button[aria-pressed=true]{font-weight:700;outline:2px solid #111}
+.big{font-size:16px;padding:8px 18px}
+#msg{padding:6px 8px;border:1px solid currentColor}
+</style>
+</head>
+<body>
+<h1>Roblox Product Manager</h1>
+<p id="msg" class="hide" role="alert"></p>
+
+<section id="out" class="hide">
+  <p>Create and edit <b>game passes</b>, <b>developer products</b> and <b>badges</b> for your Roblox experiences, many at a time.</p>
+  <form action="/login" method="get"><button class="big" type="submit">Sign in with Roblox</button></form>
+  <h2>How signing in works</h2>
+  <ol>
+    <li>Click <b>Sign in with Roblox</b>. You go to Roblox's own page (apis.roblox.com). This app never sees your password.</li>
+    <li>Log in to Roblox if it asks. You need a 13+ account.</li>
+    <li>Roblox shows what this app wants to do: view and edit game passes and developer products, and create and edit badges.
+      Creating a badge can spend Robux once the game's free badges for the day are used up. This app always asks you before that happens.</li>
+    <li>Choose the experiences this app may manage. You can choose your own experiences and group experiences your role is allowed to manage.</li>
+    <li>Confirm. Roblox sends you back here, signed in.</li>
+    <li>Pick a game, pick a tab, then create or edit.</li>
+  </ol>
+  <p class="muted">Need a different game later? After signing in, click <b>Add or remove games</b>. Signing out revokes this app's access.</p>
+</section>
+
+<section id="in" class="hide">
+  <p>Signed in as <b id="who"></b> <button id="logout" type="button">Sign out</button></p>
+  <fieldset id="lock">
+    <p>
+      <label>Game: <select id="game"></select></label>
+      <button id="refreshGames" type="button">Refresh list</button>
+      <a href="/login?prompt=consent">Add or remove games</a>
+    </p>
+    <p id="noGames" class="hide">No games are shared with this app yet. Click <b>Add or remove games</b> and pick experiences on the Roblox screen.</p>
+    <div id="work">
+      <nav>
+        <button type="button" data-tab="pass">Game Passes</button>
+        <button type="button" data-tab="product">Developer Products</button>
+        <button type="button" data-tab="badge">Badges</button>
+      </nav>
+      <div id="panels"></div>
+    </div>
+  </fieldset>
+</section>
+
+<script>
+'use strict';
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const ACCEPT = 'image/png,image/jpeg,image/bmp';
+let games = [], game = null, tab = 'pass', busy = false;
+
+// ---------- item types ----------
+const priced = (x, id) => {
+  const pi = x.priceInformation || {};
+  return { id, name: x.name || '', description: x.description || '', price: pi.defaultPriceInRobux ?? '',
+    forSale: !!x.isForSale, regional: (pi.enabledFeatures || []).includes('RegionalPricing'), locked: !!x.isImmutable };
+};
+const T = {
+  pass: {
+    label: 'Game Passes', one: 'game pass', priced: true, imageField: 'imageFile', gap: 250,
+    link: id => `https://www.roblox.com/game-pass/${id}`,
+    list: u => pages(t => `/api/rbx/game-passes/v1/universes/${u}/game-passes/creator?pageSize=50${t ? '&pageToken=' + encodeURIComponent(t) : ''}`,
+      d => [(d.gamePasses || []).map(x => priced(x, x.gamePassId)), d.nextPageToken]),
+    createUrl: u => `/api/rbx/game-passes/v1/universes/${u}/game-passes`,
+    updateUrl: (u, id) => `/api/rbx/game-passes/v1/universes/${u}/game-passes/${id}`,
+  },
+  product: {
+    label: 'Developer Products', one: 'developer product', priced: true, imageField: 'imageFile', gap: 400,
+    link: null,
+    list: u => pages(t => `/api/rbx/developer-products/v2/universes/${u}/developer-products/creator?pageSize=50${t ? '&pageToken=' + encodeURIComponent(t) : ''}`,
+      d => [(d.developerProducts || []).map(x => priced(x, x.productId)), d.nextPageToken]),
+    createUrl: u => `/api/rbx/developer-products/v2/universes/${u}/developer-products`,
+    updateUrl: (u, id) => `/api/rbx/developer-products/v2/universes/${u}/developer-products/${id}`,
+  },
+  badge: {
+    label: 'Badges', one: 'badge', priced: false, imageField: 'files', gap: 700,
+    link: id => `https://www.roblox.com/badges/${id}`,
+    list: u => pages(t => `/api/badges/${u}${t ? '?cursor=' + encodeURIComponent(t) : ''}`,
+      d => [(d.data || []).map(b => ({ id: b.id, name: b.name || '', description: b.description || '', enabled: !!b.enabled })), d.nextPageCursor]),
+    createUrl: u => `/api/rbx/legacy-badges/v1/universes/${u}/badges`,
+    updateUrl: (u, id) => `/api/rbx/legacy-badges/v1/badges/${id}`,
+  },
+};
+
+async function pages(urlFor, pick) {
+  const out = [];
+  let token = '';
+  for (let i = 0; i < 100; i++) {
+    const [items, next] = pick(await api('GET', urlFor(token)));
+    out.push(...items);
+    if (!next) break;
+    token = next;
+  }
+  return out;
+}
+
+// ---------- server calls ----------
+async function api(method, url, body) {
+  const opt = { method, headers: { 'x-app': '1' } };
+  if (body instanceof FormData) opt.body = body;
+  else if (body !== undefined) { opt.body = JSON.stringify(body); opt.headers['Content-Type'] = 'application/json'; }
+  let r;
+  try { r = await fetch(url, opt); } catch { throw new Error('Could not reach the app server.'); }
+  const text = await r.text();
+  let data = text;
+  try { data = text ? JSON.parse(text) : null; } catch {}
+  if (r.ok) return data;
+  const err = new Error(errorText(data, r.status));
+  if (data && data.signedOut) { err.signedOut = true; if (url !== '/api/session') signedOutView(err.message); }
+  throw err;
+}
+
+function errorText(d, status) {
+  if (d && typeof d === 'object') {
+    if (d.errorMessage) return d.errorMessage + (d.field ? ` (${d.field})` : '');
+    if (Array.isArray(d.errors) && d.errors.length) return d.errors.map(e => e.message || e.code).join('; ');
+    if (d.error) return String(d.error);
+    if (d.message) return String(d.message);
+  }
+  if (status === 401 || status === 403) return `Roblox refused this (${status}). You may not have permission to manage this game.`;
+  return `Request failed (HTTP ${status})` + (typeof d === 'string' && d ? ': ' + d.slice(0, 200) : '');
+}
+
+// ---------- views ----------
+function showMsg(text, ok) {
+  const m = $('#msg');
+  m.textContent = text || '';
+  m.className = text ? (ok ? 'ok' : 'err') : 'hide';
+}
+
+function signedOutView(message) {
+  busy = false;
+  $('#lock').disabled = false;
+  $('#in').classList.add('hide');
+  $('#out').classList.remove('hide');
+  showMsg(message || '');
+}
+
+function signedInView(s) {
+  $('#out').classList.add('hide');
+  $('#in').classList.remove('hide');
+  const u = s.user;
+  $('#who').textContent = u.name && u.username && u.name !== u.username ? `${u.name} (@${u.username})` : (u.username || u.name || `User ${u.id}`);
+  setGames(s.universes);
+}
+
+function setGames(list) {
+  games = list;
+  $('#game').innerHTML = list.map(g =>
+    `<option value="${esc(g.id)}">${esc(g.name)} | ${g.ownerType === 'Group' ? 'Group' + (g.ownerName ? ': ' + esc(g.ownerName) : '') : 'Yours'} | ID ${esc(g.id)}</option>`).join('');
+  $('#noGames').classList.toggle('hide', list.length > 0);
+  $('#work').classList.toggle('hide', !list.length);
+  if (!list.length) { game = null; return; }
+  const pick = list.find(g => game && g.id === game.id) || list.find(g => g.id === localStorage.getItem('game')) || list[0];
+  $('#game').value = pick.id;
+  if (game && pick.id === game.id) { game = pick; return; }
+  selectGame(pick.id, true);
+}
+
+function selectGame(id, force) {
+  if (!force && game && id === game.id) return;
+  if (!force && hasUnsaved() && !confirm('You have unsaved edits. Switch game and throw them away?')) { $('#game').value = game.id; return; }
+  game = games.find(g => g.id === id);
+  localStorage.setItem('game', id);
+  for (const k in T) {
+    const p = panel(k);
+    p._for = null;
+    $('.oldT tbody', p).innerHTML = '';
+    setText($('.sStatus', p), '');
+    updateCounts(p);
+  }
+  showTab(tab);
+}
+
+function showTab(key) {
+  tab = key;
+  $$('nav button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tab === key)));
+  for (const k in T) panel(k).classList.toggle('hide', k !== key);
+  if (game && panel(key)._for !== game.id) loadList(key);
+}
+
+const panel = k => document.getElementById('panel-' + k);
+const hasUnsaved = () => $$('.oldT tr.changed').length > 0;
+const payer = () => game.ownerType === 'Group' ? "the group's funds" : 'your account';
+
+function setText(el, text, cls) {
+  el.textContent = text;
+  el.classList.toggle('err', cls === 'err');
+  el.classList.toggle('ok', cls === 'ok');
+}
+const setSt = (tr, text, cls) => setText($('.st', tr), text, cls);
+
+function setBusy(b) {
+  busy = b;
+  $('#lock').disabled = b; // disables every control inside without touching their own disabled state
+}
+
+// ---------- panels ----------
+function buildPanel(key) {
+  const t = T[key];
+  const p = document.createElement('div');
+  p.id = 'panel-' + key;
+  p.className = 'hide';
+  p.innerHTML = `
+    <h2>Create ${t.label}</h2>
+    ${key === 'badge' ? '<p class="quota muted"></p>' : ''}
+    <p>Quick add: one per line as <code>${t.priced ? 'Name | Price | Description' : 'Name | Description'}</code></p>
+    <textarea class="bulk" rows="3" placeholder="${t.priced ? 'VIP | 199 | Double coins forever&#10;Speed Coil | 75' : 'Welcome | Joined the game for the first time&#10;Champion | Won 100 rounds'}"></textarea>
+    <p>
+      <button type="button" class="bulkAdd">Add these rows</button>
+      <button type="button" class="addRow">Add empty row</button>
+      <button type="button" class="clearDone">Remove created rows</button>
+    </p>
+    <table class="newT">
+      <thead><tr><th>Name *</th><th>Description</th>${t.priced ? '<th>Price (Robux)</th><th>For sale</th>' : '<th>Active</th>'}<th>Image</th><th>Status</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p>
+      Image for rows that have none: <input type="file" class="sharedImg" accept="${ACCEPT}">
+      ${t.priced ? `&nbsp; Regional pricing: <select class="regional"><option value="">Roblox default</option><option value="true">On</option><option value="false">Off</option></select>` : ''}
+    </p>
+    <p class="muted">Images: PNG, JPG or BMP. Square works best (512x512).${key === 'badge' ? ' Badge icons can be changed later in the Creator Dashboard.' : ''}</p>
+    <p><button type="button" class="createAll">Create all</button> <span class="cStatus"></span></p>
+
+    <h2>Existing ${t.label}</h2>
+    <p>
+      <button type="button" class="reload">Reload</button>
+      <button type="button" class="saveAll">Save changes</button>
+      <input type="text" class="filter" placeholder="Filter by name or ID" style="width:14em">
+      <span class="sStatus"></span>
+    </p>
+    <p class="muted">Edit any cell, then click Save changes. Edited rows turn yellow.</p>
+    <table class="oldT">
+      <thead><tr><th>ID</th><th>Name</th><th>Description</th>${t.priced ? '<th>Price (Robux)</th><th>For sale</th><th>Regional pricing</th><th>New image</th>' : '<th>Enabled</th>'}<th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>`;
+
+  $('.newT tbody', p).append(newRow(key));
+  updateCounts(p);
+
+  p.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.matches('.rm')) b.closest('tr').remove();
+    else if (b.matches('.addRow')) $('.newT tbody', p).append(newRow(key));
+    else if (b.matches('.bulkAdd')) bulkAdd(key);
+    else if (b.matches('.clearDone')) $$('.newT tr.done', p).forEach(r => r.remove());
+    else if (b.matches('.createAll')) createAll(key);
+    else if (b.matches('.reload')) { if (!hasUnsaved() || confirm('Throw away unsaved edits and reload?')) loadList(key); }
+    else if (b.matches('.saveAll')) saveAll(key);
+    updateCounts(p);
+  });
+  const onEdit = e => {
+    if (e.target.matches('.filter')) return applyFilter(p);
+    const tr = e.target.closest('.oldT tbody tr');
+    if (tr && tr._orig) { tr.classList.toggle('changed', Object.keys(diff(tr)).length > 0); updateCounts(p); }
+  };
+  p.addEventListener('input', onEdit);
+  p.addEventListener('change', onEdit);
+  return p;
+}
+
+function newRow(key, v = {}) {
+  const t = T[key], tr = document.createElement('tr');
+  const forSale = 'price' in v ? !!v.price : true;
+  tr.innerHTML = `
+    <td><input type="text" data-f="name" value="${esc(v.name)}"></td>
+    <td><input type="text" data-f="description" value="${esc(v.description)}"></td>
+    ${t.priced
+      ? `<td><input type="number" data-f="price" min="1" step="1" value="${esc(v.price)}" style="width:7em"></td><td><input type="checkbox" data-f="forSale"${forSale ? ' checked' : ''}></td>`
+      : `<td><input type="checkbox" data-f="active" checked></td>`}
+    <td><input type="file" data-f="image" accept="${ACCEPT}"></td>
+    <td class="st"></td>
+    <td><button type="button" class="rm" title="Remove this row">Remove</button></td>`;
+  return tr;
+}
+
+function bulkAdd(key) {
+  const p = panel(key), t = T[key], ta = $('.bulk', p);
+  const lines = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return setText($('.cStatus', p), 'Type or paste some lines first.', 'err');
+  const tb = $('.newT tbody', p);
+  // Drop a lone untouched empty row so pasted rows start at the top.
+  $$('tr:not(.done)', tb).forEach(r => { if ($$('input', r).every(i => i.type === 'checkbox' || !(i.type === 'file' ? i.files.length : i.value))) r.remove(); });
+  for (const line of lines) {
+    const parts = line.split('|').map(s => s.trim());
+    tb.append(newRow(key, t.priced
+      ? { name: parts[0], price: parseInt((parts[1] || '').replace(/[^\d]/g, ''), 10) || '', description: parts.slice(2).join(' | ') }
+      : { name: parts[0], description: parts.slice(1).join(' | ') }));
+  }
+  ta.value = '';
+  setText($('.cStatus', p), `Added ${lines.length} row(s). Check them, then click Create all.`);
+}
+
+function val(tr, f) {
+  const el = $(`[data-f="${f}"]`, tr);
+  if (!el) return undefined;
+  if (el.type === 'checkbox') return el.checked;
+  if (el.type === 'file') return el.files[0];
+  return el.value.trim();
+}
+
+function updateCounts(p) {
+  const n = $$('.newT tbody tr:not(.done)', p).length, c = $$('.oldT tr.changed', p).length;
+  $('.createAll', p).textContent = n ? `Create all (${n})` : 'Create all';
+  $('.saveAll', p).textContent = c ? `Save changes (${c})` : 'Save changes';
+}
+
+function applyFilter(p) {
+  const q = $('.filter', p).value.trim().toLowerCase();
+  $$('.oldT tbody tr', p).forEach(tr => {
+    tr.hidden = !!q && !!tr._orig && !tr._orig.name.toLowerCase().includes(q) && !String(tr._orig.id).includes(q);
+  });
+}
+
+function validate(t, tr) {
+  if (!val(tr, 'name')) return 'Name is required.';
+  if (t.priced && val(tr, 'forSale') && !(parseInt(val(tr, 'price'), 10) >= 1)) return 'Enter a price of 1 or more, or untick For sale.';
+  return '';
+}
+
+// ---------- create ----------
+async function createAll(key) {
+  const p = panel(key), t = T[key], u = game.id, cs = $('.cStatus', p);
+  const rows = $$('.newT tbody tr:not(.done)', p);
+  if (!rows.length) return setText(cs, 'Add at least one row first.', 'err');
+  let bad = 0;
+  for (const tr of rows) { const v = validate(t, tr); setSt(tr, v, v ? 'err' : ''); if (v) bad++; }
+  if (bad) return setText(cs, `Fix the ${bad} row(s) marked in red.`, 'err');
+
+  let free = Infinity;
+  if (key === 'badge') {
+    try { free = Number(await api('GET', `/api/badge-quota/${u}`)); }
+    catch (e) { return setText(cs, 'Could not check free badges: ' + e.message, 'err'); }
+    if (!Number.isInteger(free) || free < 0) return setText(cs, 'Could not read the free badge count from Roblox. Nothing was created.', 'err');
+    const paid = Math.max(0, rows.length - free);
+    if (paid && !confirm(`This game has ${free} free badge(s) left today.\n\n${paid} badge(s) will cost 100 Robux each (${paid * 100} Robux total), paid from ${payer()}.\n\nCreate them?`)) return;
+  }
+
+  const shared = $('.sharedImg', p).files[0];
+  const regional = t.priced ? $('.regional', p).value : '';
+  let ok = 0, fail = 0;
+  setBusy(true);
+  for (const [i, tr] of rows.entries()) {
+    setText(cs, `Creating ${i + 1} of ${rows.length}...`);
+    setSt(tr, 'Creating...');
+    const fd = new FormData();
+    fd.append('name', val(tr, 'name'));
+    if (val(tr, 'description')) fd.append('description', val(tr, 'description'));
+    if (t.priced) {
+      fd.append('isForSale', val(tr, 'forSale'));
+      if (val(tr, 'price')) fd.append('price', parseInt(val(tr, 'price'), 10));
+      if (regional) fd.append('isRegionalPricingEnabled', regional);
+    } else {
+      fd.append('paymentSourceType', game.ownerType === 'Group' ? 2 : 1);
+      fd.append('expectedCost', free > 0 ? 0 : 100); // Roblox rejects the request if the real cost differs
+      fd.append('isActive', val(tr, 'active'));
+    }
+    const img = val(tr, 'image') || shared;
+    if (img) fd.append(t.imageField, img, img.name);
+    try {
+      const r = await api('POST', t.createUrl(u), fd);
+      const id = r && (r.gamePassId ?? r.productId ?? r.id);
+      tr.classList.add('done');
+      $$('input', tr).forEach(el => { el.disabled = true; });
+      setSt(tr, 'Created' + (id ? `, ID ${id}` : ''), 'ok');
+      ok++;
+      if (key === 'badge') free--;
+    } catch (e) {
+      if (e.signedOut) break;
+      setSt(tr, e.message, 'err');
+      fail++;
+    }
+    await sleep(t.gap);
+  }
+  setBusy(false);
+  updateCounts(p);
+  setText(cs, `Done. ${ok} created${fail ? `, ${fail} failed. Fix those rows and click Create all again.` : '.'}`, fail ? 'err' : 'ok');
+  if (ok) loadList(key);
+}
+
+// ---------- edit ----------
+function diff(tr) {
+  const o = tr._orig, d = {};
+  for (const f of ['name', 'description', 'price', 'forSale', 'regional', 'enabled']) {
+    const v = val(tr, f);
+    if (v === undefined) continue;
+    const ov = f === 'price' ? String(o.price ?? '') : typeof o[f] === 'string' ? o[f].trim() : o[f];
+    if (v !== ov) d[f] = v;
+  }
+  const img = val(tr, 'image');
+  if (img) d.image = img;
+  return d;
+}
+
+async function saveAll(key) {
+  const p = panel(key), t = T[key], u = game.id, ss = $('.sStatus', p);
+  const rows = $$('.oldT tbody tr.changed', p);
+  if (!rows.length) return setText(ss, 'Nothing to save. Edit a row first.');
+  let bad = 0;
+  for (const tr of rows) { const v = validate(t, tr); setSt(tr, v, v ? 'err' : ''); if (v) bad++; }
+  if (bad) return setText(ss, `Fix the ${bad} row(s) marked in red.`, 'err');
+
+  let ok = 0, fail = 0;
+  setBusy(true);
+  for (const [i, tr] of rows.entries()) {
+    setText(ss, `Saving ${i + 1} of ${rows.length}...`);
+    setSt(tr, 'Saving...');
+    const d = diff(tr);
+    let body;
+    if (key === 'badge') {
+      body = {};
+      for (const f of ['name', 'description', 'enabled']) if (f in d) body[f] = d[f];
+    } else {
+      body = new FormData();
+      if ('name' in d) body.append('name', d.name);
+      if ('description' in d) body.append('description', d.description);
+      if ('price' in d || 'forSale' in d) {
+        body.append('isForSale', val(tr, 'forSale'));
+        if (val(tr, 'price')) body.append('price', parseInt(val(tr, 'price'), 10));
+      }
+      if ('regional' in d) body.append('isRegionalPricingEnabled', d.regional);
+      if (d.image) body.append('imageFile', d.image, d.image.name);
+    }
+    try {
+      await api('PATCH', t.updateUrl(u, tr._orig.id), body);
+      tr.classList.remove('changed');
+      setSt(tr, 'Saved', 'ok');
+      ok++;
+    } catch (e) {
+      if (e.signedOut) break;
+      setSt(tr, e.message, 'err');
+      fail++;
+    }
+    await sleep(t.gap);
+  }
+  setBusy(false);
+  updateCounts(p);
+  if (fail) return setText(ss, `${ok} saved, ${fail} failed. Fix the red rows and click Save changes again.`, 'err');
+  await loadList(key); // re-read from Roblox so the table shows what was really saved
+  setText(ss, `Saved ${ok} change(s).`, 'ok');
+}
+
+// ---------- list ----------
+async function loadList(key) {
+  const p = panel(key), u = game.id, seq = (p._seq = (p._seq || 0) + 1), tb = $('.oldT tbody', p);
+  p._for = u;
+  tb.innerHTML = '<tr><td colspan="9">Loading...</td></tr>';
+  setText($('.sStatus', p), '');
+  updateCounts(p);
+  if (key === 'badge') loadQuota();
+  try {
+    const items = await T[key].list(u);
+    if (p._seq !== seq) return;
+    renderList(key, items);
+    setText($('.sStatus', p), `${items.length} found.`);
+  } catch (e) {
+    if (p._seq !== seq) return;
+    p._for = null;
+    tb.innerHTML = `<tr><td colspan="9" class="err">${esc(e.message)}</td></tr>`;
+  }
+}
+
+function renderList(key, items) {
+  const t = T[key], p = panel(key), tb = $('.oldT tbody', p);
+  tb.innerHTML = items.length ? '' : `<tr><td colspan="9">No ${t.label.toLowerCase()} in this game yet.</td></tr>`;
+  for (const it of items) {
+    const tr = document.createElement('tr');
+    tr._orig = it;
+    tr.innerHTML =
+      `<td>${t.link ? `<a href="${t.link(esc(it.id))}" target="_blank" rel="noopener">${esc(it.id)}</a>` : esc(it.id)}</td>
+       <td><input type="text" data-f="name" value="${esc(it.name)}"></td>
+       <td><input type="text" data-f="description" value="${esc(it.description)}"></td>` +
+      (t.priced
+        ? `<td><input type="number" data-f="price" min="1" step="1" value="${esc(it.price)}" style="width:7em"></td>
+           <td><input type="checkbox" data-f="forSale"${it.forSale ? ' checked' : ''}></td>
+           <td><input type="checkbox" data-f="regional"${it.regional ? ' checked' : ''}></td>
+           <td><input type="file" data-f="image" accept="${ACCEPT}"></td>`
+        : `<td><input type="checkbox" data-f="enabled"${it.enabled ? ' checked' : ''}></td>`) +
+      `<td class="st">${it.locked ? 'Read-only (managed by Roblox)' : ''}</td>`;
+    if (it.locked) $$('input', tr).forEach(el => { el.disabled = true; });
+    tb.append(tr);
+  }
+  applyFilter(p);
+}
+
+async function loadQuota() {
+  const q = $('.quota', panel('badge')), u = game.id;
+  q.textContent = 'Checking free badges...';
+  try {
+    const n = await api('GET', `/api/badge-quota/${u}`);
+    if (game.id !== u) return;
+    q.textContent = `Free badges left today for this game: ${n}. After that, each new badge costs 100 Robux, paid from ${payer()}. You will be asked before anything is charged.`;
+  } catch (e) {
+    if (game.id === u) q.textContent = 'Could not check free badges: ' + e.message;
+  }
+}
+
+// ---------- start ----------
+for (const k in T) $('#panels').append(buildPanel(k));
+$$('nav button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+$('#game').addEventListener('change', e => selectGame(e.target.value));
+$('#refreshGames').addEventListener('click', async () => {
+  try { setGames((await api('GET', '/api/universes')).universes); showMsg(''); }
+  catch (e) { if (!e.signedOut) showMsg(e.message); }
+});
+$('#logout').addEventListener('click', async () => {
+  if (busy && !confirm('Work is still running. Sign out anyway?')) return;
+  try { await api('POST', '/api/logout'); } catch {}
+  location.href = '/';
+});
+addEventListener('beforeunload', e => { if (busy || hasUnsaved()) { e.preventDefault(); e.returnValue = ''; } });
+
+(async () => {
+  const err = new URLSearchParams(location.search).get('error');
+  if (err) history.replaceState(null, '', '/');
+  try {
+    signedInView(await api('GET', '/api/session'));
+    if (err) showMsg(err);
+  } catch (e) {
+    signedOutView(err || (e.signedOut ? '' : e.message));
+  }
+})();
+</script>
+</body>
+</html>

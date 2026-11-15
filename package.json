@@ -1,0 +1,14 @@
+{
+  "name": "roblox-product-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Create and edit Roblox game passes, developer products and badges with Sign in with Roblox (OAuth 2.0).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "node build.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
