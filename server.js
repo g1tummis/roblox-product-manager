@@ -17,11 +17,6 @@ const path = require('node:path');
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 
-// When built as a single .exe (see build.js), index.html is embedded in the executable.
-let sea = null;
-try { sea = require('node:sea'); } catch { /* older Node */ }
-const IS_SEA = !!(sea && sea.isSea());
-const APP_DIR = IS_SEA ? path.dirname(process.execPath) : __dirname;
 const SETTINGS_FILE = process.platform === 'win32' && process.env.APPDATA
   ? path.join(process.env.APPDATA, 'RobloxProductManager', 'settings.json')
   : path.join(os.homedir(), '.config', 'roblox-product-manager', 'settings.json');
@@ -70,7 +65,7 @@ const ALLOWED = [
 ];
 
 // ---------- page ----------
-const PAGE = IS_SEA ? Buffer.from(sea.getAsset('index.html')) : fs.readFileSync(path.join(__dirname, 'index.html'));
+const PAGE = fs.readFileSync(path.join(__dirname, 'index.html'));
 const SCRIPT_HASH = (() => {
   const m = /<script>([\s\S]*?)<\/script>/.exec(PAGE.toString('utf8'));
   return m ? `'sha256-${crypto.createHash('sha256').update(m[1].replace(/\r\n?/g, '\n')).digest('base64')}'` : "'none'";
@@ -481,13 +476,13 @@ function fatal(e) {
 // ---------- start ----------
 async function main() {
   process.title = 'Roblox Product Manager';
-  loadEnv(path.join(APP_DIR, '.env'));
+  loadEnv(path.join(__dirname, '.env'));
   const env = process.env;
 
   // 1) Environment variables / .env (for developers and hosting).
   if (env.ROBLOX_CLIENT_ID && env.ROBLOX_CLIENT_SECRET) {
     applyConfig({ clientId: env.ROBLOX_CLIENT_ID, clientSecret: env.ROBLOX_CLIENT_SECRET, port: env.PORT, redirectUri: env.REDIRECT_URI, scopes: env.SCOPES });
-    return startServer(IS_SEA);
+    return startServer(false);
   }
 
   // 2) Saved settings, or 3) ask for them in the console.
@@ -503,7 +498,7 @@ async function main() {
     }
   }
   applyConfig(cfg || {});
-  startServer(IS_SEA || interactive());
+  startServer(interactive());
 }
 
 main().catch(fatal);
